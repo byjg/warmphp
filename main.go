@@ -23,6 +23,7 @@ type config struct {
 	entry        string
 	workers      int
 	maxRequests  int
+	prefork      bool
 	timeout      time.Duration
 	bootTimeout  time.Duration
 	maxBody      int64
@@ -41,6 +42,7 @@ func main() {
 	flag.StringVar(&cfg.mode, "mode", "callable", "callable: entry runs once and returns the handler; script: entry is included on every request")
 	flag.IntVar(&cfg.workers, "workers", runtime.NumCPU(), "number of PHP worker processes")
 	flag.IntVar(&cfg.maxRequests, "max-requests", 0, "replace a worker after this many requests (0 = never)")
+	flag.BoolVar(&cfg.prefork, "prefork", false, "boot the application once in a master process that forks the workers (needs pcntl): they share its OPcache and its memory")
 	flag.DurationVar(&cfg.timeout, "timeout", 30*time.Second, "maximum time to wait for a worker and process a request")
 	flag.DurationVar(&cfg.bootTimeout, "boot-timeout", 30*time.Second, "maximum time for a worker to boot")
 	flag.Int64Var(&cfg.maxBody, "max-body", 32<<20, "maximum request body size in bytes")

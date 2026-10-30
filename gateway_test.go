@@ -93,6 +93,8 @@ func get(t *testing.T, url string) (*http.Response, string) {
 type counter struct {
 	Boot  string `json:"boot"`
 	Count int    `json:"count"`
+	Pid   int    `json:"pid"`
+	Rand  int    `json:"rand"`
 }
 
 func getCount(t *testing.T, srv *httptest.Server) counter {
@@ -181,6 +183,20 @@ func TestRequestVariables(t *testing.T) {
 		assertEqual(t, "input", v["input"], `{"id":7}`)
 		assertEqual(t, "post", v["post"], []any{})
 		assertEqual(t, "CONTENT_TYPE", v["server"].(map[string]any)["CONTENT_TYPE"], "application/json")
+	})
+
+	t.Run("binary body", func(t *testing.T) {
+		// Every byte value, and bytes that look like a frame: the body is sent raw after the frame
+		raw := []byte("\x00\x00\x00\x10{\"boundary\":\"x\"}")
+		for i := range 256 {
+			raw = append(raw, byte(i))
+		}
+		req, _ := http.NewRequest(http.MethodPut, srv.URL+"/vars", bytes.NewReader(raw))
+		req.Header.Set("Content-Type", "application/octet-stream")
+		_, body := send(t, req)
+		v := decode(t, body)
+
+		assertEqual(t, "input", v["input_base64"], base64.StdEncoding.EncodeToString(raw))
 	})
 
 	t.Run("multipart with files", func(t *testing.T) {
@@ -564,4 +580,116 @@ func TestRequestBodyLimit(t *testing.T) {
 	req, _ := http.NewRequest(http.MethodPost, srv.URL+"/vars", strings.NewReader(strings.Repeat("x", 11)))
 	resp, _ := send(t, req)
 	assertEqual(t, "status", resp.StatusCode, http.StatusRequestEntityTooLarge)
+}
+
+func prefork(workers int) func(*config) {
+	return func(cfg *config) {
+		cfg.prefork = true
+		cfg.workers = workers
+	}
+}
+
+func TestPreforkBootsOnceForAllWorkers(t *testing.T) {
+	srv := startGateway(t, "callable", "testdata/app.php", prefork(3))
+
+	var mu sync.Mutex
+	var all []counter
+	var wg sync.WaitGroup
+	for range 30 {
+		wg.Go(func() {
+			c := getCount(t, srv)
+			mu.Lock()
+			all = append(all, c)
+			mu.Unlock()
+		})
+	}
+	wg.Wait()
+
+	pids := map[int]int{}
+	rands := map[int]bool{}
+	for _, c := range all {
+		assertEqual(t, "boot id, the master's", c.Boot, all[0].Boot)
+		pids[c.Pid]++
+		rands[c.Rand] = true
+	}
+	assertEqual(t, "requests served", len(all), 30)
+	if len(pids) < 2 || len(pids) > 3 {
+		t.Errorf("expected 2 or 3 forked workers to serve, got %d", len(pids))
+	}
+	// Every child reseeds mt_rand(): copies of the master's state would repeat the same numbers
+	if len(rands) < len(all)-1 {
+		t.Errorf("mt_rand() repeats across workers: %d distinct values in %d requests", len(rands), len(all))
+	}
+}
+
+func TestPreforkReplacesWorkersThatExitWithoutBooting(t *testing.T) {
+	srv := startGateway(t, "callable", "testdata/app.php", prefork(1))
+
+	before := getCount(t, srv)
+	resp, body := get(t, srv.URL+"/exit")
+	assertEqual(t, "exit status", resp.StatusCode, http.StatusOK)
+	assertEqual(t, "exit body", body, "bye")
+
+	afterExit := getCount(t, srv)
+	if afterExit.Pid == before.Pid || afterExit.Count != 1 || afterExit.Boot != before.Boot {
+		t.Errorf("expected a new fork of the same boot after exit, got %+v (before %+v)", afterExit, before)
+	}
+
+	resp, _ = get(t, srv.URL+"/fatal")
+	assertEqual(t, "fatal status", resp.StatusCode, http.StatusInternalServerError)
+	afterFatal := getCount(t, srv)
+	if afterFatal.Pid == afterExit.Pid || afterFatal.Count != 1 || afterFatal.Boot != before.Boot {
+		t.Errorf("expected a new fork of the same boot after a fatal error, got %+v (before %+v)", afterFatal, afterExit)
+	}
+}
+
+func TestPreforkTimeoutKillsAndReplacesTheWorker(t *testing.T) {
+	srv := startGateway(t, "callable", "testdata/app.php", func(cfg *config) {
+		prefork(1)(cfg)
+		cfg.timeout = time.Second
+	})
+	before := getCount(t, srv)
+
+	resp, _ := get(t, srv.URL+"/sleep")
+	assertEqual(t, "status", resp.StatusCode, http.StatusGatewayTimeout)
+
+	// The master kills it and forks a replacement, which needs no boot
+	after := getCount(t, srv)
+	if after.Pid == before.Pid || after.Count != 1 {
+		t.Errorf("expected a new worker after the timeout, got %+v (before %+v)", after, before)
+	}
+}
+
+func TestPreforkMaxRequestsRecyclesTheWorker(t *testing.T) {
+	srv := startGateway(t, "callable", "testdata/app.php", func(cfg *config) {
+		prefork(1)(cfg)
+		cfg.maxRequests = 3
+	})
+
+	var counts []int
+	for range 5 {
+		counts = append(counts, getCount(t, srv).Count)
+	}
+	assertEqual(t, "counts", counts, []int{1, 2, 3, 1, 2})
+}
+
+func TestPreforkRequestsGoThroughTheSocket(t *testing.T) {
+	srv := startGateway(t, "callable", "testdata/app.php", prefork(2))
+
+	raw := []byte("\x00\x00\x00\x10{\"boundary\":\"x\"}")
+	for i := range 256 {
+		raw = append(raw, byte(i))
+	}
+	req, _ := http.NewRequest(http.MethodPut, srv.URL+"/vars?a=1", bytes.NewReader(raw))
+	req.Header.Set("Content-Type", "application/octet-stream")
+	_, body := send(t, req)
+	v := decode(t, body)
+	assertEqual(t, "input", v["input_base64"], base64.StdEncoding.EncodeToString(raw))
+	assertEqual(t, "get", v["get"], map[string]any{"a": "1"})
+
+	resp, body := get(t, srv.URL+"/large")
+	assertEqual(t, "large status", resp.StatusCode, http.StatusOK)
+	if len(body) < 1<<20 {
+		t.Errorf("large body: got %d bytes", len(body))
+	}
 }

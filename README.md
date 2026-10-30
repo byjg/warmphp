@@ -11,18 +11,24 @@ Caddy / HAProxy / nginx / static-httpserver
         - parses HTTP, builds $_SERVER (CGI/1.1 variables)
         - keeps N workers alive, one request per worker at a time
         - restarts crashed workers, kills slow ones, recycles after max-requests
-              │  stdin/stdout, length-prefixed JSON frames
+              │  stdin/stdout: length-prefixed JSON frames, bodies as raw bytes
    ┌──────────┼──────────┐
  php worker.php   php worker.php   php worker.php   ← boot once, stay in memory
 ```
 
 ## Quick start
 
+New here? [docs/getting-started.md](docs/getting-started.md) covers what most people need: build,
+run your application or framework, put nginx in front, production settings.
+
 ```bash
-go build -o phpworker-gateway .
+make build
 ./phpworker-gateway -workers 4 examples/hello/app.php
 curl 'localhost:8080/?name=joao'   # requests_served keeps growing: the app is not rebooted
 ```
+
+`make build` builds a static binary (no cgo), which runs on any Linux, Alpine included. `GOOS` and
+`GOARCH` build it for another platform, e.g. `make build GOOS=darwin GOARCH=arm64`.
 
 Put any reverse proxy in front of it, e.g. Caddy: `reverse_proxy localhost:8080`.
 
@@ -111,8 +117,11 @@ framework needs and the leaks found.
 
 ## Benchmark
 
-[docs/benchmark.md](docs/benchmark.md) runs the same user journey (login page, login, product list) on
-each framework, served by `php -S` and by the gateway, with OPcache on and off.
+[docs/benchmark.md](docs/benchmark.md) runs the same journey (log in, page through the products, read
+one, edit it, add one, page again) on each framework, served by nginx with PHP-FPM, by nginx with the
+gateway (with and without `-prefork`) and by FrankenPHP's worker mode, with OPcache on and off.
+`make benchmark` runs it; it takes hours, and its `BENCH_*` variables select what runs, e.g.
+`make benchmark BENCH_ONLY=gluo BENCH_JOURNEYS=10`.
 
 ## Options
 
@@ -128,6 +137,7 @@ each framework, served by `php -S` and by the gateway, with OPcache on and off.
 | `-boot-timeout`  | `30s`            | Maximum time for a worker to boot                                    |
 | `-max-body`      | `32MiB`          | Maximum request body (413 above it)                                  |
 | `-upload-dir`    | system temp dir  | Where uploaded files are written; PHP must see the same path         |
+| `-prefork`       | off              | Boot once in a master that forks the workers (see below); needs `pcntl` |
 
 Running PHP in Docker works too. Use `--init`, so PHP is not PID 1 and stops on SIGTERM, and use `-i`
 for stdin:
@@ -138,17 +148,36 @@ for stdin:
   examples/hello/app.php
 ```
 
+## Pre-fork
+
+Without `-prefork`, every worker is a `php` process of its own: it boots the application, and the
+CLI gives it its own OPcache. With `-prefork`, one master process boots the application and forks
+the workers with `pcntl_fork()`, as PHP-FPM forks its children: they share the master's OPcache, and
+its memory until they write to it. With 4 workers, Gluo's container goes from 104 to 55 MiB.
+
+- Each forked worker connects to a Unix socket the gateway listens on, in `-upload-dir` (PHP must
+  see it), and speaks the same protocol there.
+- The master replaces a worker that exits (`exit()`, a fatal error, `-max-requests`) with a new fork
+  of the booted application, so a replacement needs no boot. A worker past `-timeout` is killed by
+  the master, which the gateway asks on the master's stdin.
+- Connections opened during the boot (database, cache) would be shared by every worker: open them
+  lazily, on the first request. Each worker reseeds `mt_rand()`.
+- If the master itself exits, the gateway stops: restart it.
+
 ## Protocol
 
 Workers start as `php -d disable_functions=<list> worker.php <mode> <entry>`; the gateway gets
-`<list>` once from `php worker.php disable-functions`.
+`<list>` once from `php worker.php disable-functions`. With `-prefork`, the master starts as
+`php -d disable_functions=<list> worker.php <mode> <entry> <socket> <workers>`, and each forked
+worker speaks the protocol on its connection to `<socket>` instead of stdin and stdout.
 
 A frame is a 4-byte big-endian length followed by JSON. After booting, the worker sends the frame
-`{"ready":true}`. Then, for each request, the gateway sends a frame on stdin, with a new random
-boundary, and the worker answers on stdout with the raw body, the boundary, and a frame:
+`{"ready":true,"pid":<pid>}`. Then, for each request, the gateway sends a frame on stdin, with a new
+random boundary, followed by the raw request body, and the worker answers on stdout with the raw
+body, the boundary, and a frame:
 
 ```text
-gateway → worker   {"boundary":"--phpworker-<random>","server":{...CGI vars...},"body":"<base64>","fields":[[name,value]],"files":[{field,name,type,tmp_name,error,size}]}
+gateway → worker   {"boundary":"--phpworker-<random>","server":{...CGI vars...},"body_size":<n>,"fields":[[name,value]],"files":[{field,name,type,tmp_name,error,size}]}<n body bytes>
 worker  → gateway  <body bytes>--phpworker-<random>{"status":200,"headers":["Content-Type: text/html"],"exit":false}
 ```
 
@@ -156,11 +185,30 @@ Output outside a request, such as boot messages, goes to stderr, so it never mix
 The gateway rejects a frame whose length is absurd (any printable byte read as a length is), answers
 502 and replaces the worker.
 
+## Environment variables
+
+| Variable              | Read by                     | Default                         |                                                                    |
+|-----------------------|-----------------------------|---------------------------------|--------------------------------------------------------------------|
+| `PROJECT_ROOT`        | the entries of `compat/`    |                                 | the framework application's folder (see [Existing frameworks](#existing-frameworks)) |
+| `PHPWORKER_PHP`       | `make test`                 | the Makefile's Docker command   | the PHP command of the tests; it must pass stdin through          |
+| `COMPAT_DIR`          | the compatibility tests     | `../gluo-framework-comparison`  | the comparison repository                                          |
+| `COMPAT_ONLY`         | the compatibility tests     |                                 | only the builds whose name contains it                             |
+| `COMPAT_GLUO_STARTER` | the compatibility tests     |                                 | a project created from the Gluo starter, for the `gluo-starter` case |
+| `PHPWORKER_IMAGE`     | the compatibility tests     | `byjg/php:8.5-cli-load`         | the PHP image the workers run in                                   |
+
+The benchmark's variables are in [docs/benchmark.md](docs/benchmark.md#reproducing).
+
 ## Tests
 
-The tests run real PHP workers. `PHPWORKER_PHP` sets the PHP command, which must pass stdin through:
+The tests run real PHP workers:
 
 ```bash
-PHPWORKER_PHP="docker run --rm -i --init -v $PWD:$PWD -v /tmp:/tmp -u $(id -u):$(id -g) byjg/php:8.5-cli php" \
-  go test -race ./...
+make test
+```
+
+`PHPWORKER_PHP` sets the PHP command, which must pass stdin through. The Makefile's default runs
+`byjg/php:8.5-fpm-nginx` in Docker, with Xdebug off (the image loads it):
+
+```bash
+make test PHPWORKER_PHP="php"   # PHP installed on the machine
 ```

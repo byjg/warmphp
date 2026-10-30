@@ -3,7 +3,7 @@
 /**
  * Persistent PHP worker for phpworker-gateway. Plain PHP CLI: no SAPI, no FPM, no extension.
  *
- * Usage: php -d disable_functions=<list> worker.php <callable|script> <entry.php>
+ * Usage: php -d disable_functions=<list> worker.php <callable|script> <entry.php> [<socket> <workers>]
  *        php worker.php disable-functions   (prints <list>)
  *
  *   callable  entry.php runs ONCE and returns the request handler (a callable).
@@ -12,8 +12,15 @@
  *             Loaded classes and static caches stay in memory, objects do not.
  *
  * The gateway sends one request at a time on STDIN: a 4-byte big-endian length followed by
- * a JSON document. During the request, STDOUT is the response body, as in a web SAPI. The
- * request's boundary ends the body, followed by the status and headers, framed the same way.
+ * a JSON document, then the raw request body (body_size bytes). During the request, STDOUT is
+ * the response body, as in a web SAPI. The request's boundary ends the body, followed by the
+ * status and headers, framed the same way.
+ *
+ * With <socket> and <workers> (the gateway's -prefork), this process is a master: it boots the
+ * application once and forks <workers> children, which share its OPcache and, until they write
+ * to it, its memory. Each child connects to the gateway's Unix socket and speaks the same protocol
+ * there instead of on STDIN and STDOUT. The master replaces the children that exit, and reads
+ * commands on STDIN ("kill <pid>"); its end stops the master and its children.
  */
 
 declare(strict_types=1);
@@ -42,6 +49,10 @@ final class PhpWorker
     private static array $uploads = [];
     /** Session id the client has: the one in its cookie, or the last session cookie sent */
     private static string $sessionCookieId = '';
+    /** @var resource where requests come from: STDIN, or the connection of a forked worker */
+    private static mixed $in = null;
+    /** @var resource where responses go: STDOUT, or the connection of a forked worker */
+    private static mixed $out = null;
 
     /**
      * Raw request body. Replacement for php://input, which is always empty in the CLI.
@@ -195,9 +206,11 @@ final class PhpWorker
         return true;
     }
 
-    public static function run(string $mode, string $entry): void
+    public static function run(string $mode, string $entry, ?string $socket = null, int $workers = 0): void
     {
         self::$entry = $entry;
+        self::$in = STDIN;
+        self::$out = STDOUT;
         ini_set('display_errors', 'stderr');
         self::captureStrayOutput();
         chdir(dirname($entry));
@@ -225,6 +238,15 @@ final class PhpWorker
             self::finish(true);
         });
 
+        if ($socket === null) {
+            self::serve($handler);
+            return;
+        }
+        self::master($handler, $socket, $workers);
+    }
+
+    private static function serve(callable $handler): void
+    {
         self::write(['ready' => true, 'pid' => getmypid()]);
 
         while (($request = self::read()) !== null) {
@@ -237,6 +259,81 @@ final class PhpWorker
             }
             self::finish(false);
         }
+    }
+
+    /**
+     * Forks the workers from the booted application and replaces the ones that exit, until STDIN
+     * ends. Connections opened during the boot would be shared by every child: open them lazily.
+     */
+    private static function master(callable $handler, string $socket, int $workers): void
+    {
+        if (!function_exists('pcntl_fork')) {
+            fwrite(STDERR, "-prefork needs the pcntl extension\n");
+            exit(1);
+        }
+        $children = [];
+        $fork = static function () use ($handler, $socket, &$children): void {
+            $pid = pcntl_fork();
+            if ($pid === 0) {
+                self::child($handler, $socket);
+            }
+            if ($pid > 0) {
+                $children[$pid] = true;
+            } else {
+                fwrite(STDERR, "pcntl_fork() failed\n");
+                usleep(100_000);
+            }
+        };
+        for ($i = 0; $i < $workers; $i++) {
+            $fork();
+        }
+
+        $commands = '';
+        while (true) {
+            $read = [STDIN];
+            $none = null;
+            if (@stream_select($read, $none, $none, 0, 100_000) > 0) {
+                $chunk = fread(STDIN, 8192);
+                if ($chunk === false || $chunk === '') {
+                    break; // the gateway stops, or is gone
+                }
+                $commands .= $chunk;
+                while (($end = strpos($commands, "\n")) !== false) {
+                    $command = substr($commands, 0, $end);
+                    $commands = substr($commands, $end + 1);
+                    // A worker stuck in a request: the gateway gave up on it
+                    if (preg_match('/^kill (\d+)$/', $command, $match) === 1 && isset($children[(int)$match[1]])) {
+                        posix_kill((int)$match[1], SIGKILL);
+                    }
+                }
+            }
+            while (($pid = pcntl_waitpid(-1, $status, WNOHANG)) > 0) {
+                unset($children[$pid]);
+                $fork();
+            }
+        }
+
+        foreach (array_keys($children) as $pid) {
+            posix_kill($pid, SIGTERM);
+        }
+        while (pcntl_waitpid(-1, $status) > 0) {
+        }
+        exit(0);
+    }
+
+    private static function child(callable $handler, string $socket): never
+    {
+        // The master's random state was copied into every child: mt_rand() would repeat itself
+        mt_srand();
+        fclose(STDIN);
+        $connection = @stream_socket_client('unix://' . $socket, $code, $message, 5);
+        if ($connection === false) {
+            fwrite(STDERR, "connecting to $socket: $message\n");
+            exit(1);
+        }
+        self::$in = self::$out = $connection;
+        self::serve($handler);
+        exit(0);
     }
 
     /**
@@ -269,7 +366,7 @@ final class PhpWorker
             'REQUEST_TIME' => time(),
             'REQUEST_TIME_FLOAT' => microtime(true),
         ] + getenv();
-        self::$input = base64_decode((string)($request['body'] ?? ''));
+        self::$input = $request['body'];
 
         $_GET = self::parse($_SERVER['QUERY_STRING'] ?? '');
         $_POST = [];
@@ -312,7 +409,7 @@ final class PhpWorker
         self::$capturing = true;
         ob_start(static function (string $buffer, int $phase): string {
             if (($phase & PHP_OUTPUT_HANDLER_CLEAN) === 0) {
-                fwrite(STDOUT, $buffer);
+                fwrite(self::$out, $buffer);
             }
             if (($phase & PHP_OUTPUT_HANDLER_FINAL) !== 0) {
                 self::$capturing = false;
@@ -332,7 +429,7 @@ final class PhpWorker
             if (self::$capturing) {
                 ob_end_flush();
             } else {
-                fwrite(STDOUT, (string)ob_get_clean());
+                fwrite(self::$out, (string)ob_get_clean());
             }
         }
         self::$inRequest = false;
@@ -510,15 +607,21 @@ final class PhpWorker
             return null;
         }
         $json = self::readBytes(unpack('N', $size)[1]);
-        return $json === null ? null : json_decode($json, true, 512, JSON_THROW_ON_ERROR);
+        if ($json === null) {
+            return null;
+        }
+        $request = json_decode($json, true, 512, JSON_THROW_ON_ERROR);
+        // The body follows the frame as is: no base64, no JSON to scan
+        $request['body'] = self::readBytes((int)($request['body_size'] ?? 0));
+        return $request['body'] === null ? null : $request;
     }
 
     private static function readBytes(int $length): ?string
     {
         $data = '';
         while (strlen($data) < $length) {
-            $chunk = fread(STDIN, $length - strlen($data));
-            if ($chunk === false || ($chunk === '' && feof(STDIN))) {
+            $chunk = fread(self::$in, $length - strlen($data));
+            if ($chunk === false || ($chunk === '' && feof(self::$in))) {
                 return null;
             }
             $data .= $chunk;
@@ -531,12 +634,12 @@ final class PhpWorker
         $json = json_encode($message, JSON_THROW_ON_ERROR | JSON_INVALID_UTF8_SUBSTITUTE | JSON_UNESCAPED_SLASHES);
         $data = $prefix . pack('N', strlen($json)) . $json;
         for ($written = 0; $written < strlen($data); $written += $count) {
-            $count = fwrite(STDOUT, substr($data, $written));
+            $count = fwrite(self::$out, substr($data, $written));
             if ($count === false || $count === 0) {
                 exit(1); // The gateway is gone
             }
         }
-        fflush(STDOUT);
+        fflush(self::$out);
     }
 }
 
@@ -547,8 +650,9 @@ if ($argc === 2 && $argv[1] === 'disable-functions') {
     exit(0);
 }
 
-if ($argc !== 3 || !in_array($argv[1], ['callable', 'script'], true) || ($entry = realpath($argv[2])) === false) {
-    fwrite(STDERR, "usage: php -d disable_functions=<list> worker.php <callable|script> <entry.php>\n");
+if (!in_array($argc, [3, 5], true) || !in_array($argv[1], ['callable', 'script'], true) || ($entry = realpath($argv[2])) === false
+    || ($argc === 5 && (int)$argv[4] < 1)) {
+    fwrite(STDERR, "usage: php -d disable_functions=<list> worker.php <callable|script> <entry.php> [<socket> <workers>]\n");
     exit(2);
 }
 
@@ -559,4 +663,4 @@ if ($enabled !== []) {
 }
 require __DIR__ . '/functions.php';
 
-PhpWorker::run($argv[1], $entry);
+PhpWorker::run($argv[1], $entry, $argv[3] ?? null, (int)($argv[4] ?? 0));

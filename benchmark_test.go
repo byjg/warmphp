@@ -2,14 +2,19 @@
 
 package main
 
-// php -S against phpworker-gateway on the builds of gluo-framework-comparison: every framework
-// serves the same user journey (see docs/benchmark.md), with OPcache on and off.
+// PHP-FPM, phpworker-gateway (with and without -prefork) and FrankenPHP's worker mode on the builds
+// of gluo-framework-comparison: every framework serves the same crud journey (see
+// docs/benchmark.md), with OPcache on and off.
 //
 //   go test -tags compat -run TestBenchmark -v -timeout 3h                   # BENCH_JOURNEYS=3000
 //   BENCH_JOURNEYS=10 go test -tags compat -run TestBenchmark -v             # smoke run
 //
 // BENCH_JOURNEYS  journeys per run (default 3000); BENCH_CLIENTS  concurrent clients and PHP
-// processes on each side (default 4); BENCH_ONLY  runs the targets whose name contains it.
+// processes on each server (default 4); BENCH_ONLY  runs the targets whose name contains it;
+// BENCH_SUITE  fullstack or api; BENCH_SERVERS  the servers to run, comma separated (default
+// fpm,worker,prefork,frankenphp); BENCH_PHP_INI  PHP settings for every server, space separated
+// (default xdebug.mode=off: the PHP image loads Xdebug); BENCH_IMAGE  the PHP image (default
+// byjg/php:8.5-fpm-nginx); COMPAT_DIR  the comparison repository (default ../gluo-framework-comparison).
 // Results: benchmark/results.tsv.
 
 import (
@@ -17,8 +22,9 @@ import (
 	"errors"
 	"fmt"
 	"html"
+	"math"
+	"math/rand/v2"
 	"net/http"
-	"net/http/httptest"
 	"net/url"
 	"os"
 	"os/exec"
@@ -31,18 +37,35 @@ import (
 	"time"
 )
 
-// benchTarget is a build of the comparison and how php -S serves it
+// benchTarget is a build of the comparison and how nginx serves it
 type benchTarget struct {
 	framework
-	journey   func(b *browser, fw framework) ([]time.Duration, error)
-	phpServer []string // php -S arguments after the address, run in phpServerDir
-	serverDir string   // relative to the project; the project when empty
-	noPhpS    bool     // the php -S row of another target covers this one
-	suite     string   // "fullstack" or "api"; empty for Gluo, which is in both
+	journey func(b *browser, target benchTarget) ([]time.Duration, error)
+	docRoot string // the public folder, relative to the project
+	front   string // the front controller, relative to docRoot: what nginx falls back to
+	noFPM   bool   // the fpm row of another target covers this one
+	suite   string // "fullstack" or "api"; empty for Gluo, which is in both
+
+	listPages [2]string // the list's first two pages, with the build's own paging
+	editPath  string    // a product's edit page, %d its id (forms and Inertia)
+	afterSave string    // where a saved form redirects to (forms); the list when empty
+	reseed    string    // the build's own reset and seed, run in the project before every run
+	reseedEnv []string
+	db        [3]string // compose service, database and product table: where products 6..100 go
 }
 
-// The steps of a journey: the login page, the login, the product list
-var benchSteps = []string{"page", "login", "list"}
+// The steps of the journey: the login page, the login, the list as two pages of 50, a random
+// product, a new price for it, a new product, the two pages again
+var benchSteps = []string{"page", "login", "list1", "list2", "get", "edit", "add", "relist1", "relist2"}
+
+// benchProducts is how many products the database has before a run
+const benchProducts = 100
+
+func randomProduct() int { return rand.IntN(benchProducts) + 1 }
+
+func randomPrice() float64 { return math.Round((1+rand.Float64()*998)*100) / 100 }
+
+func randomName() string { return fmt.Sprintf("Bench %d", rand.Int64()) }
 
 func timed(steps *[]time.Duration, request func() error) error {
 	start := time.Now()
@@ -52,7 +75,8 @@ func timed(steps *[]time.Duration, request func() error) error {
 }
 
 // journeyForms: Symfony, CakePHP and CodeIgniter, server-rendered forms with CSRF
-func journeyForms(b *browser, fw framework) ([]time.Duration, error) {
+func journeyForms(b *browser, target benchTarget) ([]time.Duration, error) {
+	fw := target.framework
 	var steps []time.Duration
 	var login page
 	if err := timed(&steps, func() (err error) {
@@ -66,16 +90,9 @@ func journeyForms(b *browser, fw framework) ([]time.Duration, error) {
 		return steps, fmt.Errorf("no login form (%d %s)", login.status, login.path)
 	}
 	form := forms(login.body)[i]
-	form.fields.Set(fw.userField, adminEmail)
-	form.fields.Set(fw.passwordField, adminPassword)
-	action := cmpOr(form.action, fw.loginPath)
-	if u, err := url.Parse(action); err == nil && u.IsAbs() {
-		action = u.RequestURI()
-	}
 
 	if err := timed(&steps, func() error {
-		p, err := b.try(cmpOr(form.method, http.MethodPost), action, strings.NewReader(form.fields.Encode()),
-			map[string]string{"Content-Type": "application/x-www-form-urlencoded"})
+		p, err := b.trySubmit(form, map[string]string{fw.userField: adminEmail, fw.passwordField: adminPassword}, fw.loginPath)
 		if err == nil && (p.status != http.StatusOK || p.path == fw.loginPath) {
 			err = fmt.Errorf("login failed: %d %s", p.status, p.path)
 		}
@@ -84,19 +101,91 @@ func journeyForms(b *browser, fw framework) ([]time.Duration, error) {
 		return steps, err
 	}
 
-	err := timed(&steps, func() error {
-		p, err := b.try(http.MethodGet, fw.listPath, nil, nil)
-		// Every product row links to its edit page
-		if err == nil && (p.status != http.StatusOK || p.path != fw.listPath || !strings.Contains(p.body, "/edit")) {
-			err = fmt.Errorf("no product list: %d %s", p.status, p.path)
+	list := func(path string) func() error {
+		return func() error {
+			p, err := b.try(http.MethodGet, path, nil, nil)
+			// Every product row links to its edit page
+			if err == nil && (p.status != http.StatusOK || p.path != fw.listPath || !strings.Contains(p.body, "/edit")) {
+				err = fmt.Errorf("no product list: %d %s", p.status, p.path)
+			}
+			return err
 		}
-		return err
-	})
-	return steps, err
+	}
+	return steps, crudSteps(&steps, target, list, crudFormSteps(b, target))
+}
+
+// crudFormSteps: a product's edit form, posted with a new price, and the new-product form, posted
+func crudFormSteps(b *browser, target benchTarget) [3]func() error {
+	fw := target.framework
+	var edit htmlForm
+	var from string
+	return [3]func() error{
+		func() error {
+			from = fmt.Sprintf(target.editPath, randomProduct())
+			p, err := b.try(http.MethodGet, from, nil, nil)
+			if err != nil {
+				return err
+			}
+			i := slices.IndexFunc(forms(p.body), hasField(fw.nameField))
+			if p.status != http.StatusOK || i < 0 {
+				return fmt.Errorf("no edit form at %s: %d %s", from, p.status, p.path)
+			}
+			edit = forms(p.body)[i]
+			return nil
+		},
+		func() error {
+			p, err := b.trySubmit(edit, map[string]string{fw.priceField: strconv.FormatFloat(randomPrice(), 'f', 2, 64)}, from)
+			if err == nil && (p.status != http.StatusOK || p.path != cmpOr(target.afterSave, fw.listPath)) {
+				err = fmt.Errorf("edit failed: %d %s", p.status, p.path)
+			}
+			return err
+		},
+		func() error {
+			p, err := b.try(http.MethodGet, fw.newPath, nil, nil)
+			if err != nil {
+				return err
+			}
+			i := slices.IndexFunc(forms(p.body), hasField(fw.nameField))
+			if i < 0 {
+				return fmt.Errorf("no new-product form: %d %s", p.status, p.path)
+			}
+			price := strconv.FormatFloat(randomPrice(), 'f', 2, 64)
+			p, err = b.trySubmit(forms(p.body)[i], map[string]string{fw.nameField: randomName(), fw.priceField: price}, fw.newPath)
+			if err == nil && (p.status != http.StatusOK || p.path != cmpOr(target.afterSave, fw.listPath)) {
+				err = fmt.Errorf("add failed: %d %s", p.status, p.path)
+			}
+			return err
+		},
+	}
+}
+
+// crudSteps times the journey after the login: two pages, get, edit, add, two pages again
+func crudSteps(steps *[]time.Duration, target benchTarget, list func(path string) func() error, getEditAdd [3]func() error) error {
+	for _, step := range []func() error{list(target.listPages[0]), list(target.listPages[1]),
+		getEditAdd[0], getEditAdd[1], getEditAdd[2], list(target.listPages[0]), list(target.listPages[1])} {
+		if err := timed(steps, step); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// trySubmit posts a form with some of its fields changed, as a browser does
+func (b *browser) trySubmit(form htmlForm, values map[string]string, from string) (page, error) {
+	for name, value := range values {
+		form.fields.Set(name, value)
+	}
+	action := cmpOr(form.action, from)
+	if u, err := url.Parse(action); err == nil && u.IsAbs() {
+		action = u.RequestURI()
+	}
+	return b.try(cmpOr(form.method, http.MethodPost), action, strings.NewReader(form.fields.Encode()),
+		map[string]string{"Content-Type": "application/x-www-form-urlencoded"})
 }
 
 // journeyInertia: Laravel's React screens, which log in and navigate with JSON requests
-func journeyInertia(b *browser, fw framework) ([]time.Duration, error) {
+func journeyInertia(b *browser, target benchTarget) ([]time.Duration, error) {
+	fw := target.framework
 	var steps []time.Duration
 	var version string
 	if err := timed(&steps, func() error {
@@ -143,18 +232,50 @@ func journeyInertia(b *browser, fw framework) ([]time.Duration, error) {
 		return steps, err
 	}
 
-	err := timed(&steps, func() error {
-		p, ip, err := inertia(http.MethodGet, fw.listPath, nil)
-		if products, _ := ip.Props["products"].([]any); err == nil && (p.status != http.StatusOK || len(products) == 0) {
-			err = fmt.Errorf("no product list: %d %s", p.status, p.path)
+	list := func(path string) func() error {
+		return func() error {
+			p, ip, err := inertia(http.MethodGet, path, nil)
+			if products, _ := ip.Props["products"].([]any); err == nil && (p.status != http.StatusOK || len(products) == 0) {
+				err = fmt.Errorf("no product list: %d %s", p.status, p.path)
+			}
+			return err
+		}
+	}
+
+	// The edit page, a PUT with a new price, a POST of a new product: what the React screens send
+	var id int
+	var name string
+	saved := func(p page, err error, what string) error {
+		if err == nil && (p.status != http.StatusOK || p.path != fw.listPath) {
+			err = fmt.Errorf("%s failed: %d %s", what, p.status, p.path)
 		}
 		return err
+	}
+	return steps, crudSteps(&steps, target, list, [3]func() error{
+		func() error {
+			id = randomProduct()
+			p, ip, err := inertia(http.MethodGet, fmt.Sprintf(target.editPath, id), nil)
+			product, _ := ip.Props["product"].(map[string]any)
+			name, _ = product["name"].(string)
+			if err == nil && (p.status != http.StatusOK || name == "") {
+				err = fmt.Errorf("no edit page for %d: %d %s", id, p.status, p.path)
+			}
+			return err
+		},
+		func() error {
+			p, _, err := inertia(http.MethodPut, fmt.Sprintf("%s/%d", fw.listPath, id), map[string]any{"name": name, "price": randomPrice()})
+			return saved(p, err, "edit")
+		},
+		func() error {
+			p, _, err := inertia(http.MethodPost, fw.listPath, map[string]any{"name": randomName(), "price": randomPrice()})
+			return saved(p, err, "add")
+		},
 	})
-	return steps, err
 }
 
 // journeyAPI: Gluo. Its login page is the React SPA, a static file: no PHP for that step
-func journeyAPI(b *browser, fw framework) ([]time.Duration, error) {
+func journeyAPI(b *browser, target benchTarget) ([]time.Duration, error) {
+	fw := target.framework
 	steps := []time.Duration{0}
 	var token string
 	if err := timed(&steps, func() error {
@@ -168,22 +289,55 @@ func journeyAPI(b *browser, fw framework) ([]time.Duration, error) {
 		return steps, err
 	}
 
-	err := timed(&steps, func() error {
-		p, err := b.try(http.MethodGet, fw.listPath, nil, map[string]string{"Accept": "application/json", "Authorization": "Bearer " + token})
-		var products []any
-		if err == nil {
-			_ = json.Unmarshal([]byte(p.body), &products)
+	list := func(path string) func() error {
+		return func() error {
+			p, err := b.try(http.MethodGet, path, nil, map[string]string{"Accept": "application/json", "Authorization": "Bearer " + token})
+			var products []any
+			if err == nil {
+				_ = json.Unmarshal([]byte(p.body), &products)
+			}
+			if err == nil && (p.status != http.StatusOK || len(products) == 0) {
+				err = fmt.Errorf("no product list: %d %.100s", p.status, p.body)
+			}
+			return err
 		}
-		if err == nil && (p.status != http.StatusOK || len(products) == 0) {
-			err = fmt.Errorf("no product list: %d %.100s", p.status, p.body)
+	}
+
+	// GET, PUT with a new price, POST of a new product: the SPA's calls
+	var id int
+	var name string
+	written := func(p page, err error, what string) error {
+		if err == nil && (p.status < 200 || p.status > 299) {
+			err = fmt.Errorf("%s failed: %d %.100s", what, p.status, p.body)
 		}
 		return err
+	}
+	return steps, crudSteps(&steps, target, list, [3]func() error{
+		func() error {
+			id = randomProduct()
+			p, data, err := b.tryAPI(http.MethodGet, fmt.Sprintf("%s/%d", fw.listPath, id), token, nil)
+			name, _ = data["name"].(string)
+			if err == nil && (p.status != http.StatusOK || name == "") {
+				err = fmt.Errorf("no product %d: %d %.100s", id, p.status, p.body)
+			}
+			return err
+		},
+		func() error {
+			p, _, err := b.tryAPI(http.MethodPut, fmt.Sprintf("%s/%d", fw.listPath, id), token, map[string]any{"name": name, "price": randomPrice()})
+			return written(p, err, "edit")
+		},
+		func() error {
+			p, _, err := b.tryAPI(http.MethodPost, fw.listPath, token, map[string]any{"name": randomName(), "price": randomPrice()})
+			return written(p, err, "add")
+		},
 	})
-	return steps, err
 }
 
 func (b *browser) tryAPI(method, path, token string, body any) (page, map[string]any, error) {
-	data, _ := json.Marshal(body)
+	var data []byte
+	if body != nil {
+		data, _ = json.Marshal(body)
+	}
 	headers := map[string]string{"Content-Type": "application/json", "Accept": "application/json"}
 	if token != "" {
 		headers["Authorization"] = "Bearer " + token
@@ -234,7 +388,7 @@ func runJourneys(t *testing.T, target benchTarget, addr string, n, c int) benchR
 			for range jobs {
 				b := newBrowser(t, target.baseURL, addr)
 				begin := time.Now()
-				steps, err := target.journey(b, target.framework)
+				steps, err := target.journey(b, target)
 				total := time.Since(begin)
 				b.http.CloseIdleConnections()
 				mu.Lock()
@@ -263,130 +417,354 @@ func runJourneys(t *testing.T, target benchTarget, addr string, n, c int) benchR
 	return result
 }
 
-// benchPHP is how PHP runs on both sides: the same image, user, mounts and settings
-func benchPHP(root string, target benchTarget, opcache string, docker ...string) []string {
+// benchContainer starts the server's container, the same for every server but the image: user,
+// mounts and settings. It is stopped when the test ends; it returns its name.
+func benchContainer(t *testing.T, root string, target benchTarget, image, script string) string {
 	here, _ := filepath.Abs(".")
-	image := cmpOr(os.Getenv("PHPWORKER_IMAGE"), "byjg/php:8.5-cli-load")
-	cmd := append([]string{"docker", "run", "--rm", "--network", "host", "-u", fmt.Sprintf("%d:%d", os.Getuid(), os.Getgid()),
-		"-v", root + ":" + root, "-v", here + ":" + here, "-v", "/tmp:/tmp", "-e", "PROJECT_ROOT=" + root}, docker...)
+	name := "phpworker-bench-" + strconv.Itoa(os.Getpid())
+	cmd := []string{"docker", "run", "--rm", "-d", "--init", "--name", name, "--network", "host",
+		"-u", fmt.Sprintf("%d:%d", os.Getuid(), os.Getgid()),
+		"-v", root + ":" + root, "-v", here + ":" + here, "-v", "/tmp:/tmp", "-e", "PROJECT_ROOT=" + root}
 	for _, env := range target.env {
 		cmd = append(cmd, "-e", env)
 	}
-	// php -S ignores opcache.enable_cli (its SAPI is cli-server): both settings, on both sides
-	return append(cmd, image, "php", "-d", "opcache.enable="+opcache, "-d", "opcache.enable_cli="+opcache)
+	cmd = append(cmd, "--entrypoint", "sh", image, "-c", script)
+	if out, err := exec.Command(cmd[0], cmd[1:]...).CombinedOutput(); err != nil {
+		t.Fatalf("docker run: %v %s", err, out)
+	}
+	t.Cleanup(func() { _ = exec.Command("docker", "stop", name).Run() })
+	return name
+}
+
+// benchImage has php, php-fpm and nginx: FPM and the gateway's workers run the same PHP build
+func benchImage() string {
+	return cmpOr(os.Getenv("BENCH_IMAGE"), "byjg/php:8.5-fpm-nginx")
+}
+
+// benchINI is the PHP configuration of every server: OPcache, and BENCH_PHP_INI
+func benchINI(opcache string) [][2]string {
+	settings := [][2]string{{"opcache.enable", opcache}, {"opcache.enable_cli", opcache}}
+	for _, setting := range strings.Fields(cmpOr(os.Getenv("BENCH_PHP_INI"), "xdebug.mode=off")) {
+		name, value, _ := strings.Cut(setting, "=")
+		settings = append(settings, [2]string{name, value})
+	}
+	return settings
+}
+
+// benchDefines is benchINI as php and php-fpm options
+func benchDefines(opcache string) string {
+	var defines []string
+	for _, setting := range benchINI(opcache) {
+		defines = append(defines, "-d "+setting[0]+"="+setting[1])
+	}
+	return strings.Join(defines, " ")
+}
+
+// benchAddr is where every server listens
+const benchAddr = "127.0.0.1:18811"
+
+// benchNginx writes the nginx configuration FPM and the gateway share (the image's defaults: worker
+// processes, mime types) around server, the part that differs, and returns the command that runs
+// it. The image's own start scripts listen on port 80 as its user; here nginx runs as the user
+// that owns the projects, on the host network, so every path it writes is in dir.
+func benchNginx(t *testing.T, dir, server string) string {
+	conf := filepath.Join(dir, "nginx.conf")
+	text := fmt.Sprintf(`worker_processes auto;
+pid %[1]s/nginx.pid;
+error_log stderr warn;
+events { worker_connections 1024; }
+http {
+    include /etc/nginx/mime.types;
+    access_log off;
+    client_max_body_size 1m;
+    client_body_temp_path %[1]s/client;
+    proxy_temp_path %[1]s/proxy;
+    fastcgi_temp_path %[1]s/fastcgi;
+    uwsgi_temp_path %[1]s/uwsgi;
+    scgi_temp_path %[1]s/scgi;
+%[2]s
+}
+`, dir, server)
+	if err := os.WriteFile(conf, []byte(text), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return "exec nginx -e stderr -c " + conf + " -g 'daemon off;'"
 }
 
 func waitHTTP(t *testing.T, addr, host string) {
 	t.Helper()
-	// Any answer means the server is up; a redirect (CodeIgniter's /) goes to the configured host
+	// Any answer but nginx's 502 (the backend still booting) means the server is up; a redirect
+	// (CodeIgniter's /) goes to the configured host
 	client := &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
 	for range 240 {
 		req, _ := http.NewRequest(http.MethodGet, "http://"+addr+"/", nil)
 		req.Host = host
 		if resp, err := client.Do(req); err == nil {
 			resp.Body.Close()
-			return
+			if resp.StatusCode != http.StatusBadGateway {
+				return
+			}
 		}
 		time.Sleep(500 * time.Millisecond)
 	}
 	t.Fatalf("nothing answers on %s", addr)
 }
 
-// startPhpS serves the target with the built-in server and C processes (PHP_CLI_SERVER_WORKERS)
-func startPhpS(t *testing.T, target benchTarget, root, opcache string, c int) string {
-	addr := "127.0.0.1:18811"
-	name := "phpworker-bench-" + strconv.Itoa(os.Getpid())
-	args := benchPHP(root, target, opcache, "-d", "--name", name, "-w", filepath.Join(root, target.serverDir),
-		"-e", "PHP_CLI_SERVER_WORKERS="+strconv.Itoa(c))
-	args = append(args, "-d", "variables_order=EGPCS", "-S", addr)
-	args = append(args, target.phpServer...)
-	if out, err := exec.Command(args[0], args[1:]...).CombinedOutput(); err != nil {
-		t.Fatalf("php -S: %v %s", err, out)
+// startFPM serves the target with nginx and PHP-FPM: C static children, the project's front
+// controller as nginx's fallback, as the image does with NGINX_ROOT and PHP_CONTROLLER.
+// variables_order=EGPCS: the settings are environment variables, which Symfony's Dotenv only
+// reads from $_SERVER and $_ENV.
+func startFPM(t *testing.T, target benchTarget, root, opcache string, c int) string {
+	dir := t.TempDir()
+	pool := filepath.Join(dir, "php-fpm.conf")
+	if err := os.WriteFile(pool, []byte(fmt.Sprintf(`[global]
+pid = %[1]s/php-fpm.pid
+error_log = /proc/self/fd/2
+[www]
+listen = %[1]s/php-fpm.sock
+pm = static
+pm.max_children = %[2]d
+clear_env = no
+catch_workers_output = yes
+decorate_workers_output = no
+`, dir, c)), 0o644); err != nil {
+		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = exec.Command("docker", "stop", name).Run() })
+	nginx := benchNginx(t, dir, fmt.Sprintf(`    server {
+        listen %s;
+        root %s;
+        location / {
+            try_files $uri %s?$query_string;
+        }
+        location ~ \.php$ {
+            fastcgi_pass unix:%s/php-fpm.sock;
+            include /etc/nginx/fastcgi_params;
+            fastcgi_param SCRIPT_FILENAME $document_root$fastcgi_script_name;
+        }
+    }`, benchAddr, filepath.Join(root, target.docRoot), target.front, dir))
+	name := benchContainer(t, root, target, benchImage(),
+		fmt.Sprintf("php-fpm -y %s -D %s -d variables_order=EGPCS && %s", pool, benchDefines(opcache), nginx))
 	u, _ := url.Parse(target.baseURL)
-	waitHTTP(t, addr, u.Host)
-	return addr
+	waitHTTP(t, benchAddr, u.Host)
+	return name
 }
 
-// startWorkers serves the target with the gateway, C workers and the boot file of compat/
+// benchGateway builds the gateway once, static, to run in the PHP image
+var benchGateway = sync.OnceValues(func() (string, error) {
+	path := filepath.Join(os.TempDir(), "phpworker-bench-gateway")
+	cmd := exec.Command("go", "build", "-o", path, ".")
+	cmd.Env = append(os.Environ(), "CGO_ENABLED=0")
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return "", fmt.Errorf("%v %s", err, out)
+	}
+	return path, nil
+})
+
+// startWorkers serves the target with nginx and the gateway: C workers (its child processes, the
+// frames go through plain pipes) and the boot file of compat/
 func startWorkers(t *testing.T, target benchTarget, root, opcache string, c int) string {
-	here, _ := filepath.Abs(".")
-	g, err := newGateway(config{
-		php:          benchPHP(root, target, opcache, "-i", "--init"),
-		workerScript: filepath.Join(here, "php/worker.php"),
-		mode:         "callable",
-		entry:        filepath.Join(here, "compat", target.boot),
-		workers:      c,
-		maxRequests:  target.maxRequests,
-		timeout:      60 * time.Second,
-		bootTimeout:  120 * time.Second,
-		maxBody:      1 << 20,
-		uploadDir:    os.TempDir(),
-	})
+	return startBenchGateway(t, target, root, opcache, c, "")
+}
+
+// startPrefork is startWorkers with -prefork: one master boots the application and forks the C
+// workers, which share its OPcache and memory and talk to the gateway over a Unix socket
+func startPrefork(t *testing.T, target benchTarget, root, opcache string, c int) string {
+	return startBenchGateway(t, target, root, opcache, c, "-prefork")
+}
+
+func startBenchGateway(t *testing.T, target benchTarget, root, opcache string, c int, flags string) string {
+	gateway, err := benchGateway()
 	if err != nil {
 		t.Fatal(err)
 	}
-	srv := httptest.NewServer(g)
-	t.Cleanup(func() {
-		srv.Close()
-		g.Close()
-	})
-	return srv.Listener.Addr().String()
+	here, _ := filepath.Abs(".")
+	listen := "127.0.0.1:18812"
+	dir := t.TempDir()
+	nginx := benchNginx(t, dir, fmt.Sprintf(`    upstream gateway {
+        server %s;
+        keepalive 16;
+    }
+    server {
+        listen %s;
+        location / {
+            proxy_pass http://gateway;
+            proxy_http_version 1.1;
+            proxy_set_header Connection "";
+            proxy_set_header Host $http_host;
+            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        }
+    }`, listen, benchAddr))
+	name := benchContainer(t, root, target, benchImage(), fmt.Sprintf(
+		"%s %s -listen %s -workers %d -max-requests %d -timeout 60s -boot-timeout 120s -max-body %d -upload-dir %s -php 'php %s' -worker %s %s & %s",
+		gateway, flags, listen, c, target.maxRequests, 1<<20, dir, benchDefines(opcache),
+		filepath.Join(here, "php/worker.php"), filepath.Join(here, "compat", target.boot), nginx))
+	u, _ := url.Parse(target.baseURL)
+	waitHTTP(t, benchAddr, u.Host)
+	return name
+}
+
+// benchFrankenImage builds FrankenPHP's image with the builds' extensions, once
+var benchFrankenImage = sync.OnceValues(func() (string, error) {
+	image := "phpworker-bench-frankenphp"
+	if out, err := exec.Command("docker", "build", "-q", "-t", image, "benchmark/frankenphp").CombinedOutput(); err != nil {
+		return "", fmt.Errorf("%v %s", err, out)
+	}
+	return image, nil
+})
+
+// startFrankenPHP serves the target with FrankenPHP's worker mode: C threads, each running
+// compat/frankenphp.php, which boots the same boot file of compat/ once and handles every request.
+// Its own Caddyfile, as nginx's: no admin API, no HTTPS, no compression, and Caddy's data in dir.
+func startFrankenPHP(t *testing.T, target benchTarget, root, opcache string, c int) string {
+	image, err := benchFrankenImage()
+	if err != nil {
+		t.Fatal(err)
+	}
+	here, _ := filepath.Abs(".")
+	dir := t.TempDir()
+	var ini []string
+	for _, setting := range append(benchINI(opcache), [2]string{"variables_order", "EGPCS"}) {
+		ini = append(ini, "\t\tphp_ini "+setting[0]+" "+setting[1])
+	}
+	caddyfile := filepath.Join(dir, "Caddyfile")
+	if err := os.WriteFile(caddyfile, []byte(fmt.Sprintf(`{
+	admin off
+	auto_https off
+	persist_config off
+	frankenphp {
+		num_threads %[1]d
+%[2]s
+	}
+}
+
+http://:%[3]s {
+	bind 127.0.0.1
+	root %[4]s
+	php_server {
+		worker {
+			file %[5]s
+			num %[1]d
+			match *
+			env PHPWORKER_BOOT %[6]s
+			env PHPWORKER_MAX_REQUESTS %[7]d
+		}
+	}
+}
+`, c, strings.Join(ini, "\n"), strings.Split(benchAddr, ":")[1], filepath.Join(root, target.docRoot),
+		filepath.Join(here, "compat/frankenphp.php"), target.boot, target.maxRequests)), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	name := benchContainer(t, root, target, image, fmt.Sprintf(
+		"export XDG_CONFIG_HOME=%[1]s XDG_DATA_HOME=%[1]s && exec frankenphp run --config %[2]s --adapter caddyfile", dir, caddyfile))
+	u, _ := url.Parse(target.baseURL)
+	waitHTTP(t, benchAddr, u.Host)
+	return name
+}
+
+// benchMemory is the memory the server's container uses, as docker stats shows it (without the
+// page cache)
+func benchMemory(t *testing.T, name string) string {
+	out, err := exec.Command("docker", "stats", "--no-stream", "--format", "{{.MemUsage}}", name).Output()
+	if err != nil {
+		t.Errorf("docker stats: %v", err)
+		return ""
+	}
+	return strings.ReplaceAll(strings.TrimSpace(strings.Split(string(out), "/")[0]), " ", "")
 }
 
 func TestBenchmark(t *testing.T) {
 	journeys, _ := strconv.Atoi(cmpOr(os.Getenv("BENCH_JOURNEYS"), "3000"))
 	clients, _ := strconv.Atoi(cmpOr(os.Getenv("BENCH_CLIENTS"), "4"))
-	laravelRouter := "vendor/laravel/framework/src/Illuminate/Foundation/resources/server.php"
 	laravelEnv := []string{"DB_HOST=127.0.0.1", "DB_PORT=3307", "CACHE_STORE=array"}
 	// The API builds run with the settings of their full-stack siblings (their .env has the database)
 	apiLaravelEnv := []string{"CACHE_STORE=array"}
+	servers := strings.Split(cmpOr(os.Getenv("BENCH_SERVERS"), "fpm,worker,prefork,frankenphp"), ",")
+	start := map[string]func(*testing.T, benchTarget, string, string, int) string{
+		"fpm": startFPM, "worker": startWorkers, "prefork": startPrefork, "frankenphp": startFrankenPHP,
+	}
+	for _, server := range servers {
+		if start[server] == nil {
+			t.Fatalf("BENCH_SERVERS: unknown server %q", server)
+		}
+	}
+
+	// Every run resets each build with its own documented commands: tables recreated, so the
+	// ids start at 1, and the build's 5 seeded products
+	cakeReseed := "bin/cake migrations rollback -t 0 && bin/cake migrations migrate && bin/cake seeds run -q -f"
+	codeigniterReseed := "php spark migrate:refresh --all -f && php spark db:seed ProductSeeder"
+	// Not fixtures:load --purge-with-truncate: in MySQL, TRUNCATE ends Doctrine's transaction
+	symfonyReseed := "php bin/console doctrine:schema:drop --force --full-database -q && " +
+		"php bin/console doctrine:migrations:migrate -n -q && php bin/console doctrine:fixtures:load -n -q"
+	laravelReseed := "php artisan migrate:fresh --seed --force"
+	apiPages := [2]string{"/product?page=0&size=50", "/product?page=1&size=50"}
 
 	targets := []benchTarget{
 		{framework: framework{name: "symfony", project: "frameworks/fullstack/symfony-official", boot: "symfony.php", baseURL: "http://localhost:8083",
-			env: []string{"APP_ENV=prod", "APP_DEBUG=0"}, loginPath: "/login", listPath: "/product",
-			userField: "_username", passwordField: "_password"},
-			journey: journeyForms, phpServer: []string{"-t", "public", "public/index.php"}, suite: "fullstack"},
+			env: []string{"APP_ENV=prod", "APP_DEBUG=0"}, loginPath: "/login", listPath: "/product", newPath: "/product/new",
+			userField: "_username", passwordField: "_password", nameField: "product[name]", priceField: "product[price]"},
+			journey: journeyForms, docRoot: "public", front: "/index.php", suite: "fullstack",
+			// no paging: the list is the whole table
+			listPages: [2]string{"/product", "/product"}, editPath: "/product/%d/edit",
+			reseed: symfonyReseed, db: [3]string{"database", "app", "product"}},
 		{framework: framework{name: "cakephp", project: "frameworks/fullstack/cakephp", boot: "cakephp.php", baseURL: "http://localhost:8084",
 			env: []string{"DEBUG=false", "APP_FULL_BASE_URL=http://localhost:8084"}, loginPath: "/users/login", listPath: "/products",
-			userField: "email", passwordField: "password"},
-			journey: journeyForms, phpServer: []string{"-t", "webroot", "webroot/index.php"}, suite: "fullstack"},
+			newPath: "/products/add", userField: "email", passwordField: "password", nameField: "name", priceField: "price"},
+			journey: journeyForms, docRoot: "webroot", front: "/index.php", suite: "fullstack",
+			// the build routes / to the list, so redirect(['action' => 'index']) answers /
+			listPages: [2]string{"/products?page=1&limit=50", "/products?page=2&limit=50"}, editPath: "/products/edit/%d", afterSave: "/",
+			reseed: cakeReseed, db: [3]string{"database", "app", "products"}},
 		{framework: framework{name: "codeigniter", project: "frameworks/fullstack/codeigniter", boot: "codeigniter.php", baseURL: "http://localhost:8085",
-			loginPath: "/login", listPath: "/products", userField: "email", passwordField: "password"},
-			journey: journeyForms, phpServer: []string{"-t", "public", "vendor/codeigniter4/framework/system/rewrite.php"}, suite: "fullstack"},
+			loginPath: "/login", listPath: "/products", newPath: "/products/new", userField: "email", passwordField: "password",
+			nameField: "name", priceField: "price"},
+			journey: journeyForms, docRoot: "public", front: "/index.php", suite: "fullstack",
+			// paginate(20): its page size is fixed
+			listPages: [2]string{"/products?page=1", "/products?page=2"}, editPath: "/products/edit/%d",
+			reseed: codeigniterReseed, db: [3]string{"database", "app", "products"}},
 		{framework: framework{name: "laravel-fresh", project: "frameworks/fullstack/laravel", boot: "laravel-fresh.php", baseURL: "http://localhost:8081",
 			env: laravelEnv, loginPath: "/login", listPath: "/products", maxRequests: 30},
-			journey: journeyInertia, serverDir: "public", phpServer: []string{"-t", ".", "../" + laravelRouter}, suite: "fullstack"},
+			journey: journeyInertia, docRoot: "public", front: "/index.php", suite: "fullstack",
+			// no paging: the list is the whole table
+			listPages: [2]string{"/products", "/products"}, editPath: "/products/%d/edit",
+			reseed: laravelReseed, reseedEnv: laravelEnv, db: [3]string{"mysql", "laravel", "products"}},
 		{framework: framework{name: "laravel-shared", project: "frameworks/fullstack/laravel", boot: "laravel-shared.php", baseURL: "http://localhost:8081",
 			env: laravelEnv, loginPath: "/login", listPath: "/products"},
-			journey: journeyInertia, noPhpS: true, suite: "fullstack"},
+			journey: journeyInertia, noFPM: true, suite: "fullstack",
+			listPages: [2]string{"/products", "/products"}, editPath: "/products/%d/edit",
+			reseed: laravelReseed, reseedEnv: laravelEnv, db: [3]string{"mysql", "laravel", "products"}},
 		{framework: framework{name: "gluo", project: "frameworks/gluo", boot: "gluo.php", baseURL: "http://localhost:8080",
 			env: []string{"APP_ENV=dev"}, loginPath: "/login", listPath: "/product", requires: gluoApplication},
-			journey: journeyAPI, phpServer: []string{"-t", "public", "public/app.php"}},
+			journey: journeyAPI, docRoot: "public", front: "/app.php",
+			listPages: apiPages, reseed: "php gluo --env=dev migrate:reset", db: [3]string{"gluo-database", "localdev", "product"}},
 
 		// The same frameworks as JSON APIs in front of Gluo's SPA: the journey is Gluo's
 		{framework: framework{name: "api-symfony", project: "frameworks/api/symfony", boot: "symfony.php", baseURL: "http://localhost:9082",
 			env: []string{"APP_ENV=prod", "APP_DEBUG=0"}, loginPath: "/login", listPath: "/product"},
-			journey: journeyAPI, phpServer: []string{"-t", "public", "public/index.php"}, suite: "api"},
+			journey: journeyAPI, docRoot: "public", front: "/index.php", suite: "api",
+			listPages: apiPages, reseed: symfonyReseed, db: [3]string{"database", "app", "product"}},
 		{framework: framework{name: "api-cakephp", project: "frameworks/api/cakephp", boot: "cakephp.php", baseURL: "http://localhost:9083",
 			env: []string{"DEBUG=false", "APP_FULL_BASE_URL=http://localhost:9083"}, loginPath: "/login", listPath: "/product"},
-			journey: journeyAPI, phpServer: []string{"-t", "webroot", "webroot/index.php"}, suite: "api"},
+			journey: journeyAPI, docRoot: "webroot", front: "/index.php", suite: "api",
+			listPages: apiPages, reseed: cakeReseed, db: [3]string{"database", "app", "products"}},
 		{framework: framework{name: "api-codeigniter", project: "frameworks/api/codeigniter", boot: "codeigniter.php", baseURL: "http://localhost:9084",
 			loginPath: "/login", listPath: "/product"},
-			journey: journeyAPI, phpServer: []string{"-t", "public", "vendor/codeigniter4/framework/system/rewrite.php"}, suite: "api"},
+			journey: journeyAPI, docRoot: "public", front: "/index.php", suite: "api",
+			listPages: apiPages, reseed: codeigniterReseed, db: [3]string{"database", "app", "products"}},
 		{framework: framework{name: "api-laravel-fresh", project: "frameworks/api/laravel", boot: "laravel-fresh.php", baseURL: "http://localhost:9081",
 			env: apiLaravelEnv, loginPath: "/login", listPath: "/product", maxRequests: 30},
-			journey: journeyAPI, serverDir: "public", phpServer: []string{"-t", ".", "../" + laravelRouter}, suite: "api"},
+			journey: journeyAPI, docRoot: "public", front: "/index.php", suite: "api",
+			listPages: apiPages, reseed: laravelReseed, db: [3]string{"mysql", "laravel", "products"}},
 		{framework: framework{name: "api-laravel-shared", project: "frameworks/api/laravel", boot: "laravel-shared.php", baseURL: "http://localhost:9081",
 			env: apiLaravelEnv, loginPath: "/login", listPath: "/product"},
-			journey: journeyAPI, noPhpS: true, suite: "api"},
+			journey: journeyAPI, noFPM: true, suite: "api",
+			listPages: apiPages, reseed: laravelReseed, db: [3]string{"mysql", "laravel", "products"}},
 	}
 
 	out := filepath.Join("benchmark", "results.tsv")
 	_ = os.MkdirAll("benchmark", 0o755)
 	if _, err := os.Stat(out); errors.Is(err, os.ErrNotExist) || os.Getenv("BENCH_ONLY") == "" {
-		_ = os.WriteFile(out, []byte("suite\ttarget\tserver\topcache\tjourneys\terrors\tjourneys/s\tp50\tp99\tpage\tlogin\tlist\tfirst error\n"), 0o644)
+		header := append(append([]string{"suite", "target", "server", "opcache", "journeys", "errors", "journeys/s", "p50", "p99", "memory"},
+			benchSteps...), "first error")
+		_ = os.WriteFile(out, []byte(strings.Join(header, "\t")+"\n"), 0o644)
 	}
 	write := func(line string) {
 		f, err := os.OpenFile(out, os.O_APPEND|os.O_WRONLY, 0o644)
@@ -412,34 +790,31 @@ func TestBenchmark(t *testing.T) {
 		}
 		for _, opcache := range []string{"1", "0"} {
 			label := map[string]string{"1": "on", "0": "off"}[opcache]
-			servers := []string{"php -S", "worker"}
-			if target.noPhpS {
-				servers = []string{"worker"}
-			}
 			for _, server := range servers {
-				t.Run(fmt.Sprintf("%s/%s/opcache-%s", target.name, strings.ReplaceAll(server, " ", ""), label), func(t *testing.T) {
-					start := startWorkers
-					if server == "php -S" {
-						start = startPhpS
-					}
-					addr := start(t, target, root, opcache, clients)
-					runJourneys(t, target, addr, max(clients, journeys/20), clients) // warm-up
-					r := runJourneys(t, target, addr, journeys, clients)
+				if server == "fpm" && target.noFPM {
+					continue
+				}
+				t.Run(fmt.Sprintf("%s/%s/opcache-%s", target.name, server, label), func(t *testing.T) {
+					reseed(t, target, root)
+					container := start[server](t, target, root, opcache, clients)
+					runJourneys(t, target, benchAddr, max(clients, journeys/20), clients) // warm-up
+					r := runJourneys(t, target, benchAddr, journeys, clients)
+					memory := benchMemory(t, container)
 
 					stepMeans := make([]string, len(benchSteps))
-					for i := range benchSteps {
+					for i := range stepMeans {
 						stepMeans[i] = mean(r.steps[i]).Round(10 * time.Microsecond).String()
 					}
-					// php -S has one Laravel row per suite: an application per request
+					// FPM has one Laravel row per suite: an application per request
 					name := target.name
-					if server == "php -S" {
+					if server == "fpm" {
 						name = strings.TrimSuffix(name, "-fresh")
 					}
-					line := strings.Join([]string{cmpOr(target.suite, "both"), name, server, label, strconv.Itoa(r.journeys), strconv.Itoa(r.errors),
+					fields := []string{cmpOr(target.suite, "both"), name, server, label, strconv.Itoa(r.journeys), strconv.Itoa(r.errors),
 						fmt.Sprintf("%.1f", float64(r.journeys-r.errors)/r.elapsed.Seconds()),
 						percentile(r.totals, 0.50).Round(10 * time.Microsecond).String(),
-						percentile(r.totals, 0.99).Round(10 * time.Microsecond).String(),
-						stepMeans[0], stepMeans[1], stepMeans[2], strings.Join(strings.Fields(r.firstError), " ")}, "\t")
+						percentile(r.totals, 0.99).Round(10 * time.Microsecond).String(), memory}
+					line := strings.Join(append(append(fields, stepMeans...), strings.Join(strings.Fields(r.firstError), " ")), "\t")
 					write(line)
 					t.Log(line)
 					if r.errors > 0 {
@@ -448,5 +823,30 @@ func TestBenchmark(t *testing.T) {
 				})
 			}
 		}
+	}
+}
+
+// reseed resets the build with its own commands, then adds products 6..benchProducts with one SQL
+// insert through its database service (the root password is the container's own MYSQL_ROOT_PASSWORD)
+func reseed(t *testing.T, target benchTarget, root string) {
+	t.Helper()
+	cmd := exec.Command("sh", "-c", target.reseed)
+	cmd.Dir = root
+	cmd.Env = append(os.Environ(), target.reseedEnv...)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("reseed %s: %v %s", target.name, err, out)
+	}
+
+	service, database, table := target.db[0], target.db[1], target.db[2]
+	insert := fmt.Sprintf("INSERT INTO %s (name, price, created_at, updated_at) "+
+		"WITH RECURSIVE n(i) AS (SELECT 6 UNION ALL SELECT i + 1 FROM n WHERE i < %d) "+
+		"SELECT CONCAT('Product ', LPAD(i, 3, '0')), 1 + (i * 37) %% 1000 + 0.99, NOW(), NOW() FROM n;\n"+
+		"SELECT COUNT(*), MIN(id), MAX(id) FROM %s WHERE deleted_at IS NULL;\n", table, benchProducts, table)
+	cmd = exec.Command("docker", "compose", "exec", "-T", service, "sh", "-c", `mysql -uroot -p"$MYSQL_ROOT_PASSWORD" -N `+database)
+	cmd.Dir = root
+	cmd.Stdin = strings.NewReader(insert)
+	out, err := cmd.Output()
+	if got := strings.Fields(string(out)); err != nil || len(got) != 3 || got[0] != strconv.Itoa(benchProducts) || got[1] != "1" {
+		t.Fatalf("%s: expected %d products, ids from 1 (count, min, max): %q %v", target.name, benchProducts, got, err)
 	}
 }

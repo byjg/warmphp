@@ -32,7 +32,8 @@ type phpRequest struct {
 	// request, so a body cannot contain it by chance.
 	Boundary string            `json:"boundary"`
 	Server   map[string]string `json:"server"`
-	Body     []byte            `json:"body"`
+	BodySize int               `json:"body_size"`
+	Body     []byte            `json:"-"` // written raw after the frame
 	Fields   [][2]string       `json:"fields,omitempty"`
 	Files    []upload          `json:"files,omitempty"`
 }
@@ -53,13 +54,14 @@ type phpResponse struct {
 	Exit    bool     `json:"exit"`
 }
 
-func writeFrame(w io.Writer, v any) error {
+// writeFrame writes v as a frame, then payload as is: the request body never goes through JSON
+func writeFrame(w io.Writer, v any, payload []byte) error {
 	data, err := json.Marshal(v)
 	if err != nil {
 		return err
 	}
-	frame := binary.BigEndian.AppendUint32(make([]byte, 0, 4+len(data)), uint32(len(data)))
-	_, err = w.Write(append(frame, data...))
+	frame := binary.BigEndian.AppendUint32(make([]byte, 0, 4+len(data)+len(payload)), uint32(len(data)))
+	_, err = w.Write(append(append(frame, data...), payload...))
 	return err
 }
 
@@ -111,13 +113,16 @@ func readResponse(r io.Reader, boundary []byte) (*phpResponse, error) {
 	}
 }
 
-// worker is one long-running `php worker.php` process. It serves one request at a time.
+// worker is one long-running PHP process. It serves one request at a time. It is either a
+// `php worker.php` process of its own (cmd, talking over its stdin and stdout), or a process the
+// master forked (-prefork, talking over a Unix socket connection).
 type worker struct {
-	cmd    *exec.Cmd
-	stdin  *os.File
-	stdout *os.File
+	cmd    *exec.Cmd // nil for a forked worker
+	in     io.WriteCloser
+	out    io.Closer
 	reader *bufio.Reader
-	exited chan struct{}
+	exited chan struct{} // nil for a forked worker: its errors show up on the connection
+	kill   func()        // forked worker: asks the master to kill it
 	served int
 }
 
@@ -147,7 +152,7 @@ func startWorker(cfg config) (*worker, error) {
 		return nil, err
 	}
 
-	w := &worker{cmd: cmd, stdin: stdinW, stdout: stdoutR, reader: bufio.NewReader(stdoutR), exited: make(chan struct{})}
+	w := &worker{cmd: cmd, in: stdinW, out: stdoutR, reader: bufio.NewReader(stdoutR), exited: make(chan struct{})}
 	go func() {
 		_ = cmd.Wait()
 		close(w.exited)
@@ -187,7 +192,8 @@ func (w *worker) roundTrip(ctx context.Context, req *phpRequest) (*phpResponse, 
 		boundary := make([]byte, 16)
 		_, _ = rand.Read(boundary)
 		req.Boundary = "--phpworker-" + hex.EncodeToString(boundary)
-		if err := writeFrame(w.stdin, req); err != nil {
+		req.BodySize = len(req.Body)
+		if err := writeFrame(w.in, req, req.Body); err != nil {
 			done <- result{err: err}
 			return
 		}
@@ -212,11 +218,19 @@ func (w *worker) dead() bool {
 	}
 }
 
-// stop ends the worker: graceful closes stdin so the PHP loop ends on its own,
-// otherwise it is sent SIGTERM. Either way it is killed after stopGrace.
+// stop ends the worker: graceful closes its input so the PHP loop ends on its own, otherwise it
+// is sent SIGTERM (a forked worker: SIGKILL, from the master). A process of its own is killed
+// after stopGrace; the master replaces a forked one.
 func (w *worker) stop(graceful bool) {
+	if w.cmd == nil {
+		if !graceful {
+			w.kill()
+		}
+		w.in.Close()
+		return
+	}
 	if graceful {
-		w.stdin.Close()
+		w.in.Close()
 	} else {
 		_ = w.cmd.Process.Signal(syscall.SIGTERM)
 	}
@@ -226,8 +240,8 @@ func (w *worker) stop(graceful bool) {
 		_ = w.cmd.Process.Kill()
 		<-w.exited
 	}
-	w.stdin.Close()
-	w.stdout.Close()
+	w.in.Close()
+	w.out.Close()
 }
 
 // pool keeps cfg.workers PHP processes alive and hands out idle ones.
@@ -236,10 +250,14 @@ type pool struct {
 	idle    chan *worker
 	closing atomic.Bool
 	pending sync.WaitGroup // workers being replaced
+	master  *master        // -prefork: it forks the workers and replaces them
 }
 
 func newPool(cfg config) (*pool, error) {
 	p := &pool{cfg: cfg, idle: make(chan *worker, cfg.workers)}
+	if cfg.prefork {
+		return p, p.startMaster()
+	}
 	errs := make(chan error, cfg.workers)
 	for range cfg.workers {
 		go func() {
@@ -288,7 +306,10 @@ func (p *pool) release(w *worker, healthy bool) {
 	go func() {
 		defer p.pending.Done()
 		w.stop(healthy)
-		p.respawn()
+		// The master forks the replacement of a forked worker, which connects on its own
+		if p.master == nil {
+			p.respawn()
+		}
 	}()
 }
 
@@ -312,6 +333,10 @@ func (p *pool) respawn() {
 func (p *pool) close() {
 	p.closing.Store(true)
 	p.pending.Wait()
+	if p.master != nil {
+		// The master stops its workers; their connections are closed below
+		p.master.stop()
+	}
 
 	var stopping sync.WaitGroup
 	for {

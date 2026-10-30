@@ -1,17 +1,18 @@
 <?php
 
-// Boot: runs once per worker process
+// Boot: runs once per worker process (with -prefork, once in the master)
 echo "boot output must go to stderr, not to the protocol stream\n";
 require __DIR__ . '/Namespaced.php';
 session_save_path(sys_get_temp_dir());
 $boot = bin2hex(random_bytes(4));
+mt_rand(); // seeds mt_rand() at boot: with -prefork, every child must still get its own sequence
 $count = 0;
 
 return static function () use ($boot, &$count): void {
     $count++;
     switch (parse_url($_SERVER['REQUEST_URI'], PHP_URL_PATH)) {
         case '/count':
-            echo json_encode(['boot' => $boot, 'count' => $count]);
+            echo json_encode(['boot' => $boot, 'count' => $count, 'pid' => getmypid(), 'rand' => mt_rand()]);
             break;
 
         case '/vars':
@@ -29,10 +30,11 @@ return static function () use ($boot, &$count): void {
                 'files' => $_FILES,
                 'contents' => $contents,
                 'input' => PhpWorker::input(),
+                'input_base64' => base64_encode(PhpWorker::input()),
                 'server' => array_intersect_key($_SERVER, array_flip([
                     'REQUEST_METHOD', 'REQUEST_URI', 'QUERY_STRING', 'CONTENT_TYPE', 'HTTP_X_CUSTOM', 'SCRIPT_NAME', 'PATH',
                 ])),
-            ]);
+            ], JSON_INVALID_UTF8_SUBSTITUTE);
             break;
 
         case '/headers':
