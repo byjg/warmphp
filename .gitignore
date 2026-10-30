@@ -1,0 +1,12 @@
+# The gateway binary and compiled test binaries
+/phpworker-gateway
+*.test
+
+# The benchmark's output, rewritten on every run
+benchmark/results.tsv
+
+# The example's dependencies
+examples/restserver/vendor/
+examples/restserver/composer.lock
+
+.idea/

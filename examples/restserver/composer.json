@@ -1,0 +1,11 @@
+{
+  "name": "byjg/phpworker-gateway-restserver-example",
+  "description": "ByJG RestServer running inside phpworker-gateway",
+  "type": "project",
+  "minimum-stability": "dev",
+  "prefer-stable": true,
+  "require": {
+    "php": ">=8.3",
+    "byjg/restserver": "7.0.x-dev"
+  }
+}
