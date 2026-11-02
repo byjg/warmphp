@@ -1,5 +1,5 @@
 # The gateway binary and compiled test binaries
-/phpworker-gateway
+/warmphp
 *.test
 
 # The example's dependencies

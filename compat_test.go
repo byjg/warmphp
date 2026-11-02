@@ -6,7 +6,7 @@ package main
 // changing them, through the boot files in compat/. Each project's MySQL must be running
 // and seeded (see docs/compatibility.md).
 //
-//   PHPWORKER_IMAGE=byjg/php:8.5-cli-load go test -tags compat -run TestCompat -v
+//   WARMPHP_IMAGE=byjg/php:8.5-cli-load go test -tags compat -run TestCompat -v
 //
 // COMPAT_DIR points to the comparison repository (default ../gluo-framework-comparison).
 // COMPAT_GLUO_STARTER points to a project created from the byjg/gluo starter, with its test
@@ -80,7 +80,7 @@ func startCompatGateway(t *testing.T, fw framework) string {
 			t.Skipf("%s has no %s", root, fw.requires)
 		}
 	}
-	image := os.Getenv("PHPWORKER_IMAGE")
+	image := os.Getenv("WARMPHP_IMAGE")
 	if image == "" {
 		image = "byjg/php:8.5-cli-load"
 	}

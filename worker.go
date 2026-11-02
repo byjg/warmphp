@@ -225,7 +225,7 @@ func (w *worker) roundTrip(ctx context.Context, req *phpRequest) (*phpResponse, 
 	go func() {
 		boundary := make([]byte, 16)
 		_, _ = rand.Read(boundary)
-		req.Boundary = "--phpworker-" + hex.EncodeToString(boundary)
+		req.Boundary = "--warmphp-" + hex.EncodeToString(boundary)
 		req.BodySize = len(req.Body)
 		if err := writeFrame(w.in, req, req.Body); err != nil {
 			done <- result{err: err}

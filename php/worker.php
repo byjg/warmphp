@@ -1,7 +1,7 @@
 <?php
 
 /**
- * Persistent PHP worker for phpworker-gateway. Plain PHP CLI: no SAPI, no FPM, no extension.
+ * Persistent PHP worker for WarmPHP. Plain PHP CLI: no custom SAPI, no FPM, no custom extension.
  *
  * Usage: php -d disable_functions=<list> worker.php <callable|script> <entry.php> [<socket> <workers>] [--project-root=<dir>]
  *        php worker.php disable-functions   (prints <list>)

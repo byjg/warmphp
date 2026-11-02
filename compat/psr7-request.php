@@ -9,7 +9,7 @@ use ByJG\WebRequest\Psr7\ServerRequest;
  * as RestServer's Server::withRequestObject(): php://input is empty in the CLI, so the body
  * comes from the worker.
  */
-function phpworker_psr7_request(): ServerRequest
+function warmphp_psr7_request(): ServerRequest
 {
     $scheme = ($_SERVER['HTTPS'] ?? '') === 'on' ? 'https' : 'http';
     $request = (new ServerRequest(Uri::getInstance("$scheme://{$_SERVER['HTTP_HOST']}{$_SERVER['REQUEST_URI']}"), $_SERVER, $_COOKIE))

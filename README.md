@@ -1,13 +1,17 @@
-# phpworker-gateway
+# WarmPHP
 
-Keep a PHP application booted in memory and serve HTTP with it, using only the stock
-PHP CLI binary. No custom SAPI, no PHP-FPM, no extension.
+**WarmPHP turns your PHP CLI into a web application server.**
+
+A pool of persistent workers, structured JSON logs and automatic worker recovery, all using your
+existing PHP binary.
+
+No FPM, no custom SAPI, no custom extension. Your application boots once and stays warm.
 
 ```text
 Caddy / HAProxy / nginx / static-httpserver
               │  plain HTTP (reverse proxy)
               ▼
-      phpworker-gateway (Go)
+      WarmPHP (Go)
         - parses HTTP, builds $_SERVER (CGI/1.1 variables)
         - keeps N workers alive, one request per worker at a time
         - restarts crashed workers, kills slow ones, recycles after max-requests
@@ -16,6 +20,11 @@ Caddy / HAProxy / nginx / static-httpserver
  php worker.php   php worker.php   php worker.php   ← boot once, stay in memory
 ```
 
+## Requirements
+
+PHP 8.1 or newer, with `pcntl` for `-prefork`; `php_memory_kb` in the logs needs PHP 8.2. Go only to
+build it.
+
 ## Quick start
 
 New here? [docs/getting-started.md](docs/getting-started.md) covers what most people need: build,
@@ -23,7 +32,7 @@ run your application or framework, put nginx in front, production settings.
 
 ```bash
 make build
-./phpworker-gateway -workers 4 examples/hello/app.php
+./warmphp -workers 4 examples/hello/app.php
 curl 'localhost:8080/?name=joao'   # requests_served keeps growing: the app is not rebooted
 ```
 
@@ -31,6 +40,12 @@ curl 'localhost:8080/?name=joao'   # requests_served keeps growing: the app is n
 `GOARCH` build it for another platform, e.g. `make build GOOS=darwin GOARCH=arm64`.
 
 Put any reverse proxy in front of it, e.g. Caddy: `reverse_proxy localhost:8080`.
+
+## More than `php -S`
+
+PHP's built-in development server starts your application afresh for each request. WarmPHP keeps it
+loaded across requests, manages multiple workers, and logs request timing, worker activity and PHP
+errors.
 
 ## Modes
 
@@ -105,7 +120,7 @@ with `Server::withRequestObject()`: a PSR-7 request built from the worker's glob
 
 ```bash
 (cd examples/restserver && composer install)
-./phpworker-gateway examples/restserver/app.php
+./warmphp examples/restserver/app.php
 curl 'localhost:8080/hello?name=joao'
 ```
 
@@ -115,7 +130,7 @@ Symfony, CakePHP, Laravel, CodeIgniter and Gluo (7.0, through gluo-core's `Appli
 [`compat/`](compat), which the binary carries:
 
 ```bash
-./phpworker-gateway -framework symfony -project-root /path/to/my-symfony-app
+./warmphp -framework symfony -project-root /path/to/my-symfony-app
 ```
 
 [docs/compatibility.md](docs/compatibility.md) lists what worked, what each framework needs and the
@@ -155,7 +170,7 @@ Running PHP in Docker works too. Use `--init`, so PHP is not PID 1 and stops on 
 for stdin:
 
 ```bash
-./phpworker-gateway \
+./warmphp \
   -php "docker run --rm -i --init -v $PWD:$PWD -v /tmp:/tmp -u $(id -u):$(id -g) byjg/php:8.5-cli php" \
   examples/hello/app.php
 ```
@@ -210,7 +225,7 @@ The gateway keeps no log file: it writes to stderr, and these are the ways to ta
 the logs stop until both are restarted:
 
 ```bash
-./phpworker-gateway app.php 2>&1 >/dev/null | fluent-bit -i stdin -o stdout
+./warmphp app.php 2>&1 >/dev/null | fluent-bit -i stdin -o stdout
 ```
 
 **Docker, with its `fluentd` log driver.** It sends the container's stream to Fluent Bit, wrapping
@@ -219,23 +234,23 @@ is down:
 
 ```bash
 docker run --log-driver fluentd --log-opt fluentd-address=127.0.0.1:24224 \
-  --log-opt fluentd-async=true --log-opt tag=phpworker ...
+  --log-opt fluentd-async=true --log-opt tag=warmphp ...
 ```
 
 Fluent Bit opens the `log` field with a parser that knows the gateway's time format. In a file, here
-`phpworker.conf`:
+`warmphp.conf`:
 
 ```ini
 [PARSER]
-    Name        phpworker
+    Name        warmphp
     Format      json
     Time_Key    time
     Time_Format %Y-%m-%dT%H:%M:%S.%L%z
 ```
 
 ```bash
-fluent-bit -R phpworker.conf -i forward -p port=24224 \
-  -F parser -m '*' -p key_name=log -p parser=phpworker -o stdout -m '*'
+fluent-bit -R warmphp.conf -i forward -p port=24224 \
+  -F parser -m '*' -p key_name=log -p parser=warmphp -o stdout -m '*'
 ```
 
 Replace `-o stdout` with the output of your backend.
@@ -244,7 +259,7 @@ Replace `-o stdout` with the output of your backend.
 and `copytruncate`, as nothing else does:
 
 ```bash
-./phpworker-gateway app.php 2>> /logs/gateway.log
+./warmphp app.php 2>> /logs/gateway.log
 ```
 
 The [OpenTelemetry Collector](https://opentelemetry.io/docs/collector/) reads the records as logs.
@@ -312,8 +327,8 @@ random boundary, followed by the raw request body, and the worker answers on std
 body, the boundary, and a frame:
 
 ```text
-gateway → worker   {"boundary":"--phpworker-<random>","id":"<request id>","server":{...CGI vars...},"body_size":<n>,"fields":[[name,value]],"files":[{field,name,type,tmp_name,error,size}]}<n body bytes>
-worker  → gateway  <body bytes>--phpworker-<random>{"status":200,"headers":["Content-Type: text/html"],"metrics":{"ms":23.9,"cpu_ms":6.2,"memory_kb":2840},"exit":false}
+gateway → worker   {"boundary":"--warmphp-<random>","id":"<request id>","server":{...CGI vars...},"body_size":<n>,"fields":[[name,value]],"files":[{field,name,type,tmp_name,error,size}]}<n body bytes>
+worker  → gateway  <body bytes>--warmphp-<random>{"status":200,"headers":["Content-Type: text/html"],"metrics":{"ms":23.9,"cpu_ms":6.2,"memory_kb":2840},"exit":false}
 ```
 
 Output outside a request, such as boot messages, goes to stderr, so it never mixes with a body.
@@ -328,11 +343,11 @@ The gateway rejects a frame whose length is absurd (any printable byte read as a
 | Variable              | Read by                     | Default                         |                                                                    |
 |-----------------------|-----------------------------|---------------------------------|--------------------------------------------------------------------|
 | `PROJECT_ROOT`        | the entries of `compat/`    |                                 | the framework application's folder, when `-project-root` is not given (see [Existing frameworks](#existing-frameworks)) |
-| `PHPWORKER_PHP`       | `make test`                 | the Makefile's Docker command   | the PHP command of the tests; it must pass stdin through          |
+| `WARMPHP_PHP`       | `make test`                 | the Makefile's Docker command   | the PHP command of the tests; it must pass stdin through          |
 | `COMPAT_DIR`          | the compatibility tests     | `../gluo-framework-comparison`  | the comparison repository                                          |
 | `COMPAT_ONLY`         | the compatibility tests     |                                 | only the builds whose name contains it                             |
 | `COMPAT_GLUO_STARTER` | the compatibility tests     |                                 | a project created from the Gluo starter, for the `gluo-starter` case |
-| `PHPWORKER_IMAGE`     | the compatibility tests     | `byjg/php:8.5-cli-load`         | the PHP image the workers run in                                   |
+| `WARMPHP_IMAGE`     | the compatibility tests     | `byjg/php:8.5-cli-load`         | the PHP image the workers run in                                   |
 
 The benchmark's variables are in [docs/benchmark.md](docs/benchmark.md#reproducing).
 
@@ -344,9 +359,9 @@ The tests run real PHP workers:
 make test
 ```
 
-`PHPWORKER_PHP` sets the PHP command, which must pass stdin through. The Makefile's default runs
+`WARMPHP_PHP` sets the PHP command, which must pass stdin through. The Makefile's default runs
 `byjg/php:8.5-fpm-nginx` in Docker, with Xdebug off (the image loads it):
 
 ```bash
-make test PHPWORKER_PHP="php"   # PHP installed on the machine
+make test WARMPHP_PHP="php"   # PHP installed on the machine
 ```

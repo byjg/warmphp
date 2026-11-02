@@ -65,7 +65,7 @@ func (c *config) useEmbedded() error {
 	if c.workerScript != "" && c.framework == "" {
 		return nil
 	}
-	dir, err := os.MkdirTemp(c.uploadDir, "phpworker-")
+	dir, err := os.MkdirTemp(c.uploadDir, "warmphp-")
 	if err != nil {
 		return err
 	}

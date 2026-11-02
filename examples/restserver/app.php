@@ -34,7 +34,7 @@ $routes = (new RouteList())
 // the worker's globals and body (Server::withRequestObject(), byjg/restserver 7.0)
 return static function () use ($routes): void {
     try {
-        (new Server())->withRequestObject(phpworker_psr7_request())->handle($routes);
+        (new Server())->withRequestObject(warmphp_psr7_request())->handle($routes);
     } catch (Throwable $exception) {
         // In php-fpm the exception handler RestServer registers renders it (404, 401, 422...)
         ErrorHandler::getInstance()->handleException($exception);

@@ -21,11 +21,11 @@ import (
 	"time"
 )
 
-// These tests run real PHP workers. PHPWORKER_PHP sets the command that runs the
+// These tests run real PHP workers. WARMPHP_PHP sets the command that runs the
 // PHP CLI (default "php"); it must pass stdin through, e.g.
-// PHPWORKER_PHP="docker run --rm -i --init -v $PWD:$PWD -v /tmp:/tmp -u 1000:1000 byjg/php:8.5-cli php"
+// WARMPHP_PHP="docker run --rm -i --init -v $PWD:$PWD -v /tmp:/tmp -u 1000:1000 byjg/php:8.5-cli php"
 func phpCommand(t *testing.T) []string {
-	command := strings.Fields(os.Getenv("PHPWORKER_PHP"))
+	command := strings.Fields(os.Getenv("WARMPHP_PHP"))
 	if len(command) == 0 {
 		command = []string{"php"}
 	}
@@ -448,7 +448,7 @@ func TestOutputOutsideTheBuffersIsTheBody(t *testing.T) {
 	}
 
 	// Bytes that look like the protocol must reach the client untouched
-	data := []byte("\x00\xff\r\n--phpworker-\x00\x00\x00\x10{\"status\":500}")
+	data := []byte("\x00\xff\r\n--warmphp-\x00\x00\x00\x10{\"status\":500}")
 	_, body = get(t, srv.URL+"/binary?data="+url.QueryEscape(base64.StdEncoding.EncodeToString(data)))
 	assertEqual(t, "binary body", body, string(data))
 
@@ -696,7 +696,7 @@ func TestPreforkRequestsGoThroughTheSocket(t *testing.T) {
 
 func embeddedFolders(t *testing.T, uploadDir string) []string {
 	t.Helper()
-	folders, err := filepath.Glob(filepath.Join(uploadDir, "phpworker-*"))
+	folders, err := filepath.Glob(filepath.Join(uploadDir, "warmphp-*"))
 	if err != nil {
 		t.Fatal(err)
 	}

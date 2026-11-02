@@ -236,7 +236,7 @@ func (g *gateway) buildRequest(rw http.ResponseWriter, r *http.Request) (*phpReq
 func serverVars(r *http.Request) map[string]string {
 	vars := map[string]string{
 		"GATEWAY_INTERFACE": "CGI/1.1",
-		"SERVER_SOFTWARE":   "phpworker-gateway",
+		"SERVER_SOFTWARE":   "warmphp",
 		"SERVER_PROTOCOL":   r.Proto,
 		"REQUEST_METHOD":    r.Method,
 		"REQUEST_URI":       r.RequestURI,

@@ -12,4 +12,4 @@ require_once __DIR__ . '/psr7-request.php';
 
 $app = Config::get(Application::class);
 
-return static fn() => $app->handle(phpworker_psr7_request());
+return static fn() => $app->handle(warmphp_psr7_request());

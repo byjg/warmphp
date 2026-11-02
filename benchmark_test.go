@@ -2,7 +2,7 @@
 
 package main
 
-// PHP-FPM, phpworker-gateway (with and without -prefork) and FrankenPHP's worker mode on the builds
+// PHP-FPM, warmphp (with and without -prefork) and FrankenPHP's worker mode on the builds
 // of gluo-framework-comparison: every framework serves the same crud journey (see
 // docs/benchmark.md), with OPcache on and off.
 //
@@ -422,7 +422,7 @@ func runJourneys(t *testing.T, target benchTarget, addr string, n, c int) benchR
 // mounts and settings. It is stopped when the test ends; it returns its name.
 func benchContainer(t *testing.T, root string, target benchTarget, image, script string) string {
 	here, _ := filepath.Abs(".")
-	name := "phpworker-bench-" + strconv.Itoa(os.Getpid())
+	name := "warmphp-bench-" + strconv.Itoa(os.Getpid())
 	cmd := []string{"docker", "run", "--rm", "-d", "--init", "--name", name, "--network", "host",
 		"-u", fmt.Sprintf("%d:%d", os.Getuid(), os.Getgid()),
 		"-v", root + ":" + root, "-v", here + ":" + here, "-v", "/tmp:/tmp", "-e", "PROJECT_ROOT=" + root}
@@ -555,7 +555,7 @@ var benchGateway = sync.OnceValues(func() (string, error) {
 	if path := os.Getenv("BENCH_GATEWAY"); path != "" {
 		return filepath.Abs(path)
 	}
-	path := filepath.Join(os.TempDir(), "phpworker-bench-gateway")
+	path := filepath.Join(os.TempDir(), "warmphp-bench-gateway")
 	cmd := exec.Command("go", "build", "-o", path, ".")
 	cmd.Env = append(os.Environ(), "CGO_ENABLED=0")
 	if out, err := cmd.CombinedOutput(); err != nil {
@@ -609,7 +609,7 @@ func startBenchGateway(t *testing.T, target benchTarget, root, opcache string, c
 
 // benchFrankenImage builds FrankenPHP's image with the builds' extensions, once
 var benchFrankenImage = sync.OnceValues(func() (string, error) {
-	image := "phpworker-bench-frankenphp"
+	image := "warmphp-bench-frankenphp"
 	if out, err := exec.Command("docker", "build", "-q", "-t", image, "benchmark/frankenphp").CombinedOutput(); err != nil {
 		return "", fmt.Errorf("%v %s", err, out)
 	}
@@ -649,8 +649,8 @@ http://:%[3]s {
 			file %[5]s
 			num %[1]d
 			match *
-			env PHPWORKER_BOOT %[6]s
-			env PHPWORKER_MAX_REQUESTS %[7]d
+			env WARMPHP_BOOT %[6]s
+			env WARMPHP_MAX_REQUESTS %[7]d
 		}
 	}
 }

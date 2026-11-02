@@ -1,9 +1,9 @@
 # Getting started
 
-phpworker-gateway keeps your PHP application booted in memory and serves HTTP with it, using the
+WarmPHP keeps your PHP application booted in memory and serves HTTP with it, using the
 plain PHP CLI. You put it behind your usual web server, as you would PHP-FPM.
 
-You need Go to build it, and PHP 8 CLI to run it (with `pcntl` for `-prefork`). The binary carries
+You need Go to build it, and PHP 8.1 or newer CLI to run it (with `pcntl` for `-prefork`). The binary carries
 its PHP files, so it runs from any folder, on its own.
 
 ## 1. Build
@@ -12,13 +12,13 @@ its PHP files, so it runs from any folder, on its own.
 make build
 ```
 
-This gives `./phpworker-gateway`, a static binary for this machine. For another one:
+This gives `./warmphp`, a static binary for this machine. For another one:
 `make build GOOS=linux GOARCH=arm64`.
 
 ## 2. Run the example
 
 ```bash
-./phpworker-gateway -workers 4 examples/hello/app.php
+./warmphp -workers 4 examples/hello/app.php
 curl 'localhost:8080/?name=ana'
 ```
 
@@ -45,7 +45,7 @@ return static function () use ($app): void {
 ```
 
 ```bash
-./phpworker-gateway app.php
+./warmphp app.php
 ```
 
 An **old-style `index.php`** that does everything at the top level can run as it is, in script
@@ -53,7 +53,7 @@ mode. It is included again on every request; only the loaded classes stay in mem
 less:
 
 ```bash
-./phpworker-gateway -mode script public/index.php
+./warmphp -mode script public/index.php
 ```
 
 ### 3.2 Existing frameworks
@@ -65,7 +65,7 @@ application is not changed; `-framework` picks the entry and `-project-root` say
 application is:
 
 ```bash
-./phpworker-gateway -framework symfony -project-root /path/to/my-symfony-app
+./warmphp -framework symfony -project-root /path/to/my-symfony-app
 ```
 
 The `PROJECT_ROOT` variable does the same, if you prefer it; `-project-root` wins over it.
@@ -86,8 +86,8 @@ Each entry was tested on a real application of that framework, without changing 
 changed, keeping it beside the entries it requires:
 
 ```bash
-./phpworker-gateway -extract ./phpworker
-./phpworker-gateway -project-root /path/to/app ./phpworker/compat/my-framework.php
+./warmphp -extract ./warmphp-php
+./warmphp -project-root /path/to/app ./warmphp-php/compat/my-framework.php
 ```
 
 An entry has to do three things: boot the framework once, return a function that builds the
@@ -140,7 +140,7 @@ With Caddy it is one line: `reverse_proxy localhost:8080`.
 ## 6. Production settings
 
 ```bash
-./phpworker-gateway -listen 127.0.0.1:8080 -workers 4 -prefork -max-requests 1000 -timeout 30s app.php
+./warmphp -listen 127.0.0.1:8080 -workers 4 -prefork -max-requests 1000 -timeout 30s app.php
 ```
 
 | Flag                 | What it is for                                                                                  |
@@ -162,7 +162,7 @@ errors, warnings and `error_log()`. An OpenTelemetry Collector can read them; se
 cleanly:
 
 ```bash
-./phpworker-gateway \
+./warmphp \
   -php "docker run --rm -i --init -v $PWD:$PWD -v /tmp:/tmp -u $(id -u):$(id -g) byjg/php:8.5-cli php" \
   examples/hello/app.php
 ```

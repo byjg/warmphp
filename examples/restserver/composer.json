@@ -1,6 +1,6 @@
 {
-  "name": "byjg/phpworker-gateway-restserver-example",
-  "description": "ByJG RestServer running inside phpworker-gateway",
+  "name": "byjg/warmphp-restserver-example",
+  "description": "ByJG RestServer running inside warmphp",
   "type": "project",
   "minimum-stability": "dev",
   "prefer-stable": true,
