@@ -170,6 +170,117 @@ for weeks), and removes the folder when it stops. A gateway that is killed leave
 `-worker` and an entry file take the place of the embedded ones, and `-extract` writes them out to be
 changed. After changing `php/` or `compat/` in this repository, run `make build` or pass the files.
 
+## Logs
+
+The gateway logs JSON on stderr, one record per line: its own events, a record per request, and what
+PHP writes to its stderr. Errors, warnings and `error_log()` become records of their own, with the
+stack trace in one record and the level taken from PHP's prefix:
+
+```json
+{"time":"2026-11-02T16:57:38.77Z","level":"INFO","msg":"request","request_id":"8526147b","method":"GET","path":"/products","status":200,"duration_ms":24.6,"queue_ms":0.1,"bytes":812,"worker_pid":28,"php_ms":23.9,"php_cpu_ms":6.2,"php_memory_kb":2840,"trace_id":"4bf92f3577b34da6a3ce929d0e0e4736"}
+{"time":"2026-11-02T16:57:39.36Z","level":"ERROR","msg":"PHP Fatal error:  Uncaught RuntimeException: payment failed in /app/src/Pay.php:42","source":"php","request_id":"a426d85e","worker_pid":28,"stack":"Stack trace:\n#0 /app/src/Checkout.php(18): Pay->charge()\n#1 {main}"}
+```
+
+| Field                | Meaning                                                                            |
+|----------------------|------------------------------------------------------------------------------------|
+| `path`               | Without the query string, which often carries tokens and personal data             |
+| `duration_ms`        | The whole request, in the gateway                                                  |
+| `queue_ms`           | Waiting for a free worker: when it grows, the application needs more workers       |
+| `php_ms`             | The request in PHP. A timeout or a killed worker has none of the `php_*` fields    |
+| `php_cpu_ms`         | CPU PHP used: `php_ms` far above it means waiting, usually for the database        |
+| `php_memory_kb`      | Peak of PHP's heap above what the worker already held, without OPcache; needs PHP 8.2 |
+| `trace_id`           | From the `traceparent` header, when the request has one; PHP sees that header too  |
+
+- `request_id` ties PHP's lines to the request. A worker of its own has its own stderr, so they are
+  always tied. With `-prefork` all the workers share one, so a line gets the id only when one request
+  is running: under load many have none. It is never another request's id.
+- Only what reaches stderr is captured. An application that logs to a file keeps doing so; Laravel
+  logs to stderr with `LOG_CHANNEL=stderr`. Errors a framework catches go to its logger.
+- Records are written in the background, so a destination that stalls or goes away never reaches the
+  requests or PHP. While 8,192 records wait, new ones are dropped, and a `logs dropped` record says how
+  many (`count`) when writing resumes. A stop waits up to 2 s to write what is queued; `kill -9` or a
+  crash loses it.
+- A record costs time on the simplest endpoints: see [the benchmark's note](docs/benchmark.md#results).
+
+### Sending the logs somewhere
+
+The gateway keeps no log file: it writes to stderr, and these are the ways to take the logs from there.
+
+**[Fluent Bit](https://fluentbit.io/), through a pipe.** If it exits, the gateway keeps serving, but
+the logs stop until both are restarted:
+
+```bash
+./phpworker-gateway app.php 2>&1 >/dev/null | fluent-bit -i stdin -o stdout
+```
+
+**Docker, with its `fluentd` log driver.** It sends the container's stream to Fluent Bit, wrapping
+each record in a `log` field. With `fluentd-async=true`, the container starts even when Fluent Bit
+is down:
+
+```bash
+docker run --log-driver fluentd --log-opt fluentd-address=127.0.0.1:24224 \
+  --log-opt fluentd-async=true --log-opt tag=phpworker ...
+```
+
+Fluent Bit opens the `log` field with a parser that knows the gateway's time format. In a file, here
+`phpworker.conf`:
+
+```ini
+[PARSER]
+    Name        phpworker
+    Format      json
+    Time_Key    time
+    Time_Format %Y-%m-%dT%H:%M:%S.%L%z
+```
+
+```bash
+fluent-bit -R phpworker.conf -i forward -p port=24224 \
+  -F parser -m '*' -p key_name=log -p parser=phpworker -o stdout -m '*'
+```
+
+Replace `-o stdout` with the output of your backend.
+
+**A file, read by the OpenTelemetry Collector.** Redirect stderr to it, and rotate it with `logrotate`
+and `copytruncate`, as nothing else does:
+
+```bash
+./phpworker-gateway app.php 2>> /logs/gateway.log
+```
+
+The [OpenTelemetry Collector](https://opentelemetry.io/docs/collector/) reads the records as logs.
+This configuration of its contrib distribution (tested on 0.164) sets the time, the severity, the body
+and the trace id. `include` is the path as the Collector sees it:
+
+```yaml
+receivers:
+  file_log:
+    include: [/logs/gateway.log]
+    operators:
+      - type: json_parser
+        timestamp:
+          parse_from: attributes.time
+          layout_type: gotime
+          layout: 2006-01-02T15:04:05.999999999Z07:00
+        severity:
+          parse_from: attributes.level
+      - type: move
+        from: attributes.msg
+        to: body
+      - type: trace_parser
+        if: attributes.trace_id != nil
+        trace_id:
+          parse_from: attributes.trace_id
+exporters:
+  debug:
+service:
+  pipelines:
+    logs:
+      receivers: [file_log]
+      exporters: [debug]
+```
+
+Replace `debug` with the exporter of your backend.
+
 ## Pre-fork
 
 Without `-prefork`, every worker is a `php` process of its own: it boots the application, and the
@@ -201,11 +312,14 @@ random boundary, followed by the raw request body, and the worker answers on std
 body, the boundary, and a frame:
 
 ```text
-gateway → worker   {"boundary":"--phpworker-<random>","server":{...CGI vars...},"body_size":<n>,"fields":[[name,value]],"files":[{field,name,type,tmp_name,error,size}]}<n body bytes>
-worker  → gateway  <body bytes>--phpworker-<random>{"status":200,"headers":["Content-Type: text/html"],"exit":false}
+gateway → worker   {"boundary":"--phpworker-<random>","id":"<request id>","server":{...CGI vars...},"body_size":<n>,"fields":[[name,value]],"files":[{field,name,type,tmp_name,error,size}]}<n body bytes>
+worker  → gateway  <body bytes>--phpworker-<random>{"status":200,"headers":["Content-Type: text/html"],"metrics":{"ms":23.9,"cpu_ms":6.2,"memory_kb":2840},"exit":false}
 ```
 
 Output outside a request, such as boot messages, goes to stderr, so it never mixes with a body.
+Around each request the worker writes `\x01start <id> <pid>` and `\x01end <id>` to stderr, each on a
+line of its own: they come through the pipe in order with PHP's own lines, which is how the gateway
+ties those lines to the request.
 The gateway rejects a frame whose length is absurd (any printable byte read as a length is), answers
 502 and replaces the worker.
 

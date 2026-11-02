@@ -2,10 +2,12 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
-	"log"
+	"log/slog"
 	"mime"
 	"net"
 	"net/http"
@@ -13,6 +15,7 @@ import (
 	"os/exec"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // gateway translates HTTP requests into worker requests, the same job PHP-FPM's
@@ -53,7 +56,57 @@ func (g *gateway) Close() {
 	os.RemoveAll(g.cfg.embeddedDir)
 }
 
+// outcome is what ServeHTTP logs about a request
+type outcome struct {
+	status int
+	bytes  int
+	queue  time.Duration
+	pid    int
+	php    *phpMetrics
+}
+
 func (g *gateway) ServeHTTP(rw http.ResponseWriter, r *http.Request) {
+	start := time.Now()
+	id := make([]byte, 4)
+	_, _ = rand.Read(id)
+	requestID := hex.EncodeToString(id)
+
+	done := g.handle(rw, r, requestID)
+
+	// The query string is left out: it often carries tokens and personal data
+	attrs := []slog.Attr{
+		slog.String("request_id", requestID),
+		slog.String("method", r.Method),
+		slog.String("path", r.URL.Path),
+		slog.Int("status", done.status),
+		slog.Float64("duration_ms", milliseconds(time.Since(start))),
+		slog.Float64("queue_ms", milliseconds(done.queue)),
+		slog.Int("bytes", done.bytes),
+	}
+	if done.pid != 0 {
+		attrs = append(attrs, slog.Int("worker_pid", done.pid))
+	}
+	if done.php != nil {
+		attrs = append(attrs, slog.Float64("php_ms", done.php.Milliseconds), slog.Float64("php_cpu_ms", done.php.CPUMilliseconds))
+		if done.php.MemoryKB != nil {
+			attrs = append(attrs, slog.Int("php_memory_kb", *done.php.MemoryKB))
+		}
+	}
+	if trace := traceID(r.Header.Get("Traceparent")); trace != "" {
+		attrs = append(attrs, slog.String("trace_id", trace))
+	}
+	level := slog.LevelInfo
+	if done.status >= http.StatusInternalServerError {
+		level = slog.LevelError
+	}
+	slog.LogAttrs(context.Background(), level, "request", attrs...)
+}
+
+func milliseconds(d time.Duration) float64 {
+	return float64(d.Microseconds()) / 1000
+}
+
+func (g *gateway) handle(rw http.ResponseWriter, r *http.Request, requestID string) outcome {
 	req, tmpFiles, err := g.buildRequest(rw, r)
 	defer func() {
 		for _, name := range tmpFiles {
@@ -63,32 +116,42 @@ func (g *gateway) ServeHTTP(rw http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		if _, ok := errors.AsType[*http.MaxBytesError](err); ok {
 			http.Error(rw, "request body too large", http.StatusRequestEntityTooLarge)
-			return
+			return outcome{status: http.StatusRequestEntityTooLarge}
 		}
 		http.Error(rw, "bad request", http.StatusBadRequest)
-		return
+		return outcome{status: http.StatusBadRequest}
 	}
+	req.ID = requestID
 
 	// A client disconnecting must not kill a warm worker in the middle of a request
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), g.cfg.timeout)
 	defer cancel()
 
+	queued := time.Now()
 	w, err := g.pool.acquire(ctx)
+	done := outcome{queue: time.Since(queued)}
 	if err != nil {
 		http.Error(rw, "no PHP worker available", http.StatusServiceUnavailable)
-		return
+		done.status = http.StatusServiceUnavailable
+		return done
 	}
+	done.pid = w.pid
 
 	resp, err := w.roundTrip(ctx, req)
 	if err != nil {
+		w.log.finish(requestID)
 		g.pool.release(w, false)
-		log.Printf("%s %s: %v", r.Method, r.RequestURI, err)
+		fields := []any{"request_id", requestID, "path", r.URL.Path, "worker_pid", w.pid}
 		if errors.Is(err, context.DeadlineExceeded) {
+			slog.Error("request timed out", append(fields, "timeout", g.cfg.timeout.String())...)
 			http.Error(rw, "PHP worker timed out", http.StatusGatewayTimeout)
+			done.status = http.StatusGatewayTimeout
 		} else {
+			slog.Error("PHP worker failed", append(fields, "error", err.Error())...)
 			http.Error(rw, "PHP worker failed", http.StatusBadGateway)
+			done.status = http.StatusBadGateway
 		}
-		return
+		return done
 	}
 	w.served++
 	g.pool.release(w, !resp.Exit)
@@ -103,6 +166,8 @@ func (g *gateway) ServeHTTP(rw http.ResponseWriter, r *http.Request) {
 	}
 	rw.WriteHeader(resp.Status)
 	_, _ = rw.Write(resp.Body)
+	done.status, done.bytes, done.php = resp.Status, len(resp.Body), resp.Metrics
+	return done
 }
 
 // buildRequest reads the body and, for multipart POSTs, writes the uploaded files

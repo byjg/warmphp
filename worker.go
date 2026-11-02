@@ -11,7 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log"
+	"log/slog"
 	"os"
 	"os/exec"
 	"sync"
@@ -31,6 +31,7 @@ type phpRequest struct {
 	// Boundary ends the response body on the worker's stdout. It is random for every
 	// request, so a body cannot contain it by chance.
 	Boundary string            `json:"boundary"`
+	ID       string            `json:"id"`
 	Server   map[string]string `json:"server"`
 	BodySize int               `json:"body_size"`
 	Body     []byte            `json:"-"` // written raw after the frame
@@ -52,6 +53,16 @@ type phpResponse struct {
 	Headers []string `json:"headers"`
 	Body    []byte   `json:"-"` // read from stdout before the frame
 	Exit    bool     `json:"exit"`
+
+	Metrics *phpMetrics `json:"metrics"`
+}
+
+// phpMetrics is what PHP measures of a request. MemoryKB is the peak above what the worker
+// already held, and needs PHP 8.2.
+type phpMetrics struct {
+	Milliseconds    float64 `json:"ms"`
+	CPUMilliseconds float64 `json:"cpu_ms"`
+	MemoryKB        *int    `json:"memory_kb"`
 }
 
 // writeFrame writes v as a frame, then payload as is: the request body never goes through JSON
@@ -124,6 +135,8 @@ type worker struct {
 	exited chan struct{} // nil for a forked worker: its errors show up on the connection
 	kill   func()        // forked worker: asks the master to kill it
 	served int
+	pid    int // as PHP sees it: with -php "docker run ...", cmd is the docker client
+	log    *phpLog
 }
 
 func startWorker(cfg config) (*worker, error) {
@@ -141,21 +154,36 @@ func startWorker(cfg config) (*worker, error) {
 		stdinW.Close()
 		return nil, err
 	}
+	stderrR, stderrW, err := os.Pipe()
+	if err != nil {
+		stdinR.Close()
+		stdinW.Close()
+		stdoutR.Close()
+		stdoutW.Close()
+		return nil, err
+	}
 
 	cmd := exec.Command(command[0], command[1:]...)
 	// Plain *os.File pipes: Wait() never closes our ends, so the last frame of an
 	// exiting worker (exit() or fatal error) can still be read.
-	cmd.Stdin, cmd.Stdout, cmd.Stderr = stdinR, stdoutW, os.Stderr
+	cmd.Stdin, cmd.Stdout, cmd.Stderr = stdinR, stdoutW, stderrW
+	started := time.Now()
 	err = cmd.Start()
 	stdinR.Close()
 	stdoutW.Close()
+	stderrW.Close()
 	if err != nil {
 		stdinW.Close()
 		stdoutR.Close()
+		stderrR.Close()
 		return nil, err
 	}
 
-	w := &worker{cmd: cmd, in: stdinW, out: stdoutR, reader: bufio.NewReader(stdoutR), exited: make(chan struct{})}
+	w := &worker{cmd: cmd, in: stdinW, out: stdoutR, reader: bufio.NewReader(stdoutR), exited: make(chan struct{}), log: newPHPLog()}
+	go func() {
+		w.log.read(stderrR)
+		stderrR.Close()
+	}()
 	go func() {
 		_ = cmd.Wait()
 		close(w.exited)
@@ -165,11 +193,13 @@ func startWorker(cfg config) (*worker, error) {
 	go func() {
 		var msg struct {
 			Ready bool `json:"ready"`
+			Pid   int  `json:"pid"`
 		}
 		err := readFrame(w.reader, &msg)
 		if err == nil && !msg.Ready {
 			err = errors.New("unexpected first message")
 		}
+		w.pid = msg.Pid
 		ready <- err
 	}()
 
@@ -182,6 +212,7 @@ func startWorker(cfg config) (*worker, error) {
 		w.stop(false)
 		return nil, fmt.Errorf("starting PHP worker: %w", err)
 	}
+	slog.Info("worker started", "worker_pid", w.pid, "boot_ms", milliseconds(time.Since(started)))
 	return w, nil
 }
 
@@ -305,6 +336,13 @@ func (p *pool) release(w *worker, healthy bool) {
 		return
 	}
 
+	if !p.closing.Load() {
+		reason := "max-requests"
+		if !healthy {
+			reason = "exited or failed"
+		}
+		slog.Info("worker replaced", "worker_pid", w.pid, "reason", reason)
+	}
 	p.pending.Add(1)
 	go func() {
 		defer p.pending.Done()
@@ -327,7 +365,7 @@ func (p *pool) respawn() {
 			p.idle <- w
 			return
 		}
-		log.Printf("%v (retrying in %s)", err, delay)
+		slog.Warn("replacing a PHP worker", "error", err.Error(), "retry_in", delay.String())
 		time.Sleep(delay)
 	}
 }

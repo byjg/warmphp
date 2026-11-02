@@ -4,7 +4,7 @@ import (
 	"context"
 	"flag"
 	"fmt"
-	"log"
+	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
@@ -39,6 +39,11 @@ type config struct {
 }
 
 func main() {
+	// A log destination that exits must not stop the gateway: Go ends a program on a broken stderr
+	signal.Ignore(syscall.SIGPIPE)
+	logOutput = newLogWriter(os.Stderr, logQueueSize)
+	slog.SetDefault(slog.New(slog.NewJSONHandler(logOutput, nil)))
+
 	var cfg config
 	var php, extractDir string
 	flag.StringVar(&cfg.listen, "listen", ":8080", "address to listen on")
@@ -63,7 +68,7 @@ func main() {
 
 	if extractDir != "" {
 		if err := extractTo(extractDir); err != nil {
-			log.Fatal(err)
+			fatal(err)
 		}
 		return
 	}
@@ -82,20 +87,20 @@ func main() {
 		if *path != "" {
 			var err error
 			if *path, err = filepath.Abs(*path); err != nil {
-				log.Fatal(err)
+				fatal(err)
 			}
 		}
 	}
 	if cfg.framework == "" {
 		var err error
 		if cfg.entry, err = filepath.Abs(flag.Arg(0)); err != nil {
-			log.Fatal(err)
+			fatal(err)
 		}
 	}
 
 	g, err := newGateway(cfg)
 	if err != nil {
-		log.Fatal(err)
+		fatal(err)
 	}
 
 	srv := &http.Server{Addr: cfg.listen, Handler: g}
@@ -110,11 +115,12 @@ func main() {
 		close(stopped)
 	}()
 
-	log.Printf("listening on %s with %d %s workers for %s", cfg.listen, cfg.workers, cfg.mode, g.cfg.entry)
+	slog.Info("listening", "address", cfg.listen, "workers", cfg.workers, "mode", cfg.mode, "entry", g.cfg.entry)
 	if err := srv.ListenAndServe(); err != http.ErrServerClosed {
 		g.Close()
-		log.Fatal(err)
+		fatal(err)
 	}
 	<-stopped
 	g.Close()
+	logOutput.flush(logFlushTimeout)
 }

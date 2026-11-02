@@ -37,6 +37,23 @@ return static function () use ($boot, &$count): void {
             ], JSON_INVALID_UTF8_SUBSTITUTE);
             break;
 
+        case '/throw':
+            throw new RuntimeException('uncaught-marker');
+
+        case '/warning':
+            echo $undefinedVariable;
+            echo 'warned';
+            break;
+
+        case '/error-log':
+            error_log('error-log-marker');
+            break;
+
+        case '/allocate':
+            $memory = str_repeat('a', 5 << 20);
+            echo strlen($memory);
+            break;
+
         case '/headers':
             http_response_code(201);
             header('Content-Type: application/json');

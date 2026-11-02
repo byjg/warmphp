@@ -152,6 +152,10 @@ With Caddy it is one line: `reverse_proxy localhost:8080`.
 
 Turn OPcache on for the CLI (`opcache.enable_cli=1`, in `php.ini` or with `-php "php -d opcache.enable_cli=1"`).
 
+The gateway logs JSON on stderr: a record per request with its time, CPU and memory in PHP, and PHP's
+errors, warnings and `error_log()`. An OpenTelemetry Collector can read them; see
+[Logs](../README.md#logs).
+
 ## 7. PHP in Docker
 
 `-php` is the command that runs PHP. It must keep stdin open (`-i`), and `--init` lets PHP stop

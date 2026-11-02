@@ -46,6 +46,9 @@ final class PhpWorker
     private static bool $inRequest = false;
     /** Written after the body; the gateway sends a new random one with every request */
     private static string $boundary = '';
+    /** The gateway's id of the current request, and what it started with, to measure it. */
+    private static string $requestId = '';
+    private static array $started = [];
     /** Whether the buffer that writes the body is still open (the application can close it) */
     private static bool $capturing = false;
     /** @var array<string, true> temporary files of this request's uploads */
@@ -214,7 +217,8 @@ final class PhpWorker
         self::$entry = $entry;
         self::$in = STDIN;
         self::$out = STDOUT;
-        ini_set('display_errors', 'stderr');
+        // Never the response body. When errors are logged, they already go to stderr: not twice
+        ini_set('display_errors', filter_var(ini_get('log_errors'), FILTER_VALIDATE_BOOLEAN) ? '0' : 'stderr');
         self::captureStrayOutput();
         chdir(dirname($entry));
 
@@ -359,6 +363,14 @@ final class PhpWorker
         while (ob_get_level() > 0 && @ob_end_flush()) {
         }
         self::$boundary = (string)$request['boundary'];
+        self::$requestId = (string)$request['id'];
+
+        // The gateway ties what reaches stderr between these two lines to the request
+        fwrite(STDERR, "\n\x01start " . self::$requestId . ' ' . getmypid() . "\n");
+        if (function_exists('memory_reset_peak_usage')) {
+            memory_reset_peak_usage();
+        }
+        self::$started = ['time' => hrtime(true), 'cpu' => self::cpuMilliseconds(), 'memory' => memory_get_usage()];
 
         // Environment variables stay visible in $_SERVER, as in the CLI and FrankenPHP
         $_SERVER = $request['server'] + [
@@ -445,14 +457,31 @@ final class PhpWorker
             self::$headers[] = "Content-type: $mimeType" . ($charset !== '' && str_starts_with($mimeType, 'text/') ? "; charset=$charset" : '');
         }
 
+        $metrics = [
+            'ms' => round((hrtime(true) - self::$started['time']) / 1e6, 3),
+            'cpu_ms' => round(self::cpuMilliseconds() - self::$started['cpu'], 3),
+            'memory_kb' => function_exists('memory_reset_peak_usage')
+                ? (int)((memory_get_peak_usage() - self::$started['memory']) / 1024)
+                : null,
+        ];
+        fwrite(STDERR, "\n\x01end " . self::$requestId . "\n");
+
         self::write([
             'status' => self::$status,
             'headers' => self::$headers,
+            'metrics' => $metrics,
             // Output that reached PHP's output layer anyway (every buffer closed, then echo) is in
             // the body, but it left the process with "headers sent": the gateway replaces it
             'exit' => $exiting || headers_sent(),
         ], self::$boundary);
         self::captureStrayOutput();
+    }
+
+    private static function cpuMilliseconds(): float
+    {
+        $usage = getrusage();
+        return ($usage['ru_utime.tv_sec'] + $usage['ru_stime.tv_sec']) * 1000
+            + ($usage['ru_utime.tv_usec'] + $usage['ru_stime.tv_usec']) / 1000;
     }
 
     /**

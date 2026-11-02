@@ -159,6 +159,13 @@ cost 13 (twice the work). Gluo's users moved from unsalted SHA-1 to bcrypt in Gl
 
 ## Results
 
+These numbers are from before the gateway logged anything. Its logs (a record per request, PHP's
+metrics) add about 40 to 70 µs to a request. On an endpoint that does almost nothing, 4 workers went
+from 30,300 to 23,400 requests per second with `ab`. On Gluo's journey, with 300 journeys and the
+median of 5 rounds per version, journeys/s changed by 0.6% or less, and the 7 steps after the login
+took 1.1 to 1.8% longer with OPcache on and with OPcache off on `worker`, within the difference
+between rounds; `prefork` without OPcache took 4.6% longer.
+
 100 journeys per run, one build at a time, with only that build's database up: 84 runs, 3 rounds
 each, 25,200 journeys, **no failed journey**. Each row is the round with the median journeys/s; the
 `spread` column of [`benchmark/results.tsv`](../benchmark/results.tsv) is the difference between the rounds:
