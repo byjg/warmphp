@@ -20,6 +20,8 @@ $_ENV['APP_RUNTIME_MODE'] = $_SERVER['APP_RUNTIME_MODE'] = 'web=1&worker=1';
 // What public/index.php gets from vendor/autoload_runtime.php
 (new Dotenv())->bootEnv($root . '/.env');
 $kernel = new Kernel($_SERVER['APP_ENV'], (bool)$_SERVER['APP_DEBUG']);
+// Booted here, not on the first request: with -prefork, the workers share it
+$kernel->boot();
 
 return static function () use ($kernel): void {
     $request = Request::createFromGlobals();

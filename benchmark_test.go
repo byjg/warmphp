@@ -14,7 +14,8 @@ package main
 // BENCH_SUITE  fullstack or api; BENCH_SERVERS  the servers to run, comma separated (default
 // fpm,worker,prefork,frankenphp); BENCH_PHP_INI  PHP settings for every server, space separated
 // (default xdebug.mode=off: the PHP image loads Xdebug); BENCH_IMAGE  the PHP image (default
-// byjg/php:8.5-fpm-nginx); COMPAT_DIR  the comparison repository (default ../gluo-framework-comparison).
+// byjg/php:8.5-fpm-nginx); BENCH_GATEWAY  a static gateway binary (default: go build);
+// COMPAT_DIR  the comparison repository (default ../gluo-framework-comparison).
 // Results: benchmark/results.tsv.
 
 import (
@@ -549,8 +550,11 @@ decorate_workers_output = no
 	return name
 }
 
-// benchGateway builds the gateway once, static, to run in the PHP image
+// benchGateway builds the gateway once, static, to run in the PHP image, unless BENCH_GATEWAY has one
 var benchGateway = sync.OnceValues(func() (string, error) {
+	if path := os.Getenv("BENCH_GATEWAY"); path != "" {
+		return filepath.Abs(path)
+	}
 	path := filepath.Join(os.TempDir(), "phpworker-bench-gateway")
 	cmd := exec.Command("go", "build", "-o", path, ".")
 	cmd.Env = append(os.Environ(), "CGO_ENABLED=0")
@@ -661,6 +665,26 @@ http://:%[3]s {
 	return name
 }
 
+// benchCPU is the machine's CPU counters: its busy, stolen and total time
+func benchCPU(t *testing.T) (busy, steal, total float64) {
+	stat, err := os.ReadFile("/proc/stat")
+	if err != nil {
+		t.Fatal(err)
+	}
+	fields := strings.Fields(strings.SplitN(string(stat), "\n", 2)[0])[1:]
+	for i, field := range fields[:8] { // user nice system idle iowait irq softirq steal
+		value, _ := strconv.ParseFloat(field, 64)
+		total += value
+		if i != 3 && i != 4 {
+			busy += value
+		}
+		if i == 7 {
+			steal = value
+		}
+	}
+	return busy, steal, total
+}
+
 // benchMemory is the memory the server's container uses, as docker stats shows it (without the
 // page cache)
 func benchMemory(t *testing.T, name string) string {
@@ -691,11 +715,15 @@ func TestBenchmark(t *testing.T) {
 	// Every run resets each build with its own documented commands: tables recreated, so the
 	// ids start at 1, and the build's 5 seeded products
 	cakeReseed := "bin/cake migrations rollback -t 0 && bin/cake migrations migrate && bin/cake seeds run -q -f"
-	codeigniterReseed := "php spark migrate:refresh --all -f && php spark db:seed ProductSeeder"
+	// The debug toolbar writes a file per request in development: the folder must not grow run after run
+	codeigniterReseed := "php spark migrate:refresh --all -f && php spark db:seed ProductSeeder && " +
+		"find writable/debugbar -name 'debugbar_*' -delete && find writable/session -name 'ci_session*' -delete"
 	// Not fixtures:load --purge-with-truncate: in MySQL, TRUNCATE ends Doctrine's transaction
 	symfonyReseed := "php bin/console doctrine:schema:drop --force --full-database -q && " +
 		"php bin/console doctrine:migrations:migrate -n -q && php bin/console doctrine:fixtures:load -n -q"
-	laravelReseed := "php artisan migrate:fresh --seed --force"
+	// Inertia's DevTools rewrites an index of every entry on each request, under a lock: the cost
+	// grows with the folder, and its 24h expiry makes it fall in the middle of a run
+	laravelReseed := "php artisan migrate:fresh --seed --force && rm -rf storage/inertia-devtools"
 	apiPages := [2]string{"/product?page=0&size=50", "/product?page=1&size=50"}
 
 	targets := []benchTarget{
@@ -762,7 +790,7 @@ func TestBenchmark(t *testing.T) {
 	out := filepath.Join("benchmark", "results.tsv")
 	_ = os.MkdirAll("benchmark", 0o755)
 	if _, err := os.Stat(out); errors.Is(err, os.ErrNotExist) || os.Getenv("BENCH_ONLY") == "" {
-		header := append(append([]string{"suite", "target", "server", "opcache", "journeys", "errors", "journeys/s", "p50", "p99", "memory"},
+		header := append(append([]string{"suite", "target", "server", "opcache", "journeys", "errors", "journeys/s", "p50", "p99", "memory", "cpu", "steal"},
 			benchSteps...), "first error")
 		_ = os.WriteFile(out, []byte(strings.Join(header, "\t")+"\n"), 0o644)
 	}
@@ -798,7 +826,9 @@ func TestBenchmark(t *testing.T) {
 					reseed(t, target, root)
 					container := start[server](t, target, root, opcache, clients)
 					runJourneys(t, target, benchAddr, max(clients, journeys/20), clients) // warm-up
+					busy, steal, total := benchCPU(t)
 					r := runJourneys(t, target, benchAddr, journeys, clients)
+					busyEnd, stealEnd, totalEnd := benchCPU(t)
 					memory := benchMemory(t, container)
 
 					stepMeans := make([]string, len(benchSteps))
@@ -813,7 +843,9 @@ func TestBenchmark(t *testing.T) {
 					fields := []string{cmpOr(target.suite, "both"), name, server, label, strconv.Itoa(r.journeys), strconv.Itoa(r.errors),
 						fmt.Sprintf("%.1f", float64(r.journeys-r.errors)/r.elapsed.Seconds()),
 						percentile(r.totals, 0.50).Round(10 * time.Microsecond).String(),
-						percentile(r.totals, 0.99).Round(10 * time.Microsecond).String(), memory}
+						percentile(r.totals, 0.99).Round(10 * time.Microsecond).String(), memory,
+						fmt.Sprintf("%.0f%%", 100*(busyEnd-busy)/(totalEnd-total)),
+						fmt.Sprintf("%.1f%%", 100*(stealEnd-steal)/(totalEnd-total))}
 					line := strings.Join(append(append(fields, stepMeans...), strings.Join(strings.Fields(r.firstError), " ")), "\t")
 					write(line)
 					t.Log(line)

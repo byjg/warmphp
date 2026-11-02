@@ -32,7 +32,7 @@ return static function () use ($boot, &$count): void {
                 'input' => PhpWorker::input(),
                 'input_base64' => base64_encode(PhpWorker::input()),
                 'server' => array_intersect_key($_SERVER, array_flip([
-                    'REQUEST_METHOD', 'REQUEST_URI', 'QUERY_STRING', 'CONTENT_TYPE', 'HTTP_X_CUSTOM', 'SCRIPT_NAME', 'PATH',
+                    'REQUEST_METHOD', 'REQUEST_URI', 'QUERY_STRING', 'CONTENT_TYPE', 'HTTP_X_CUSTOM', 'SCRIPT_NAME', 'PATH', 'PROJECT_ROOT',
                 ])),
             ], JSON_INVALID_UTF8_SUBSTITUTE);
             break;

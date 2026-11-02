@@ -3,7 +3,8 @@
 phpworker-gateway keeps your PHP application booted in memory and serves HTTP with it, using the
 plain PHP CLI. You put it behind your usual web server, as you would PHP-FPM.
 
-You need Go to build it, and PHP 8 CLI to run it (with `pcntl` for `-prefork`).
+You need Go to build it, and PHP 8 CLI to run it (with `pcntl` for `-prefork`). The binary carries
+its PHP files, so it runs from any folder, on its own.
 
 ## 1. Build
 
@@ -58,30 +59,41 @@ less:
 ### 3.2 Existing frameworks
 
 A framework's own `index.php` boots it on every request, and most break when it is included twice.
-[`compat/`](../compat) has an entry for each framework instead: it boots the framework once and
-handles each request the way the framework's own worker runtime does. Your application is not
-changed; `PROJECT_ROOT` tells the entry where it is:
+The binary has an entry for each framework instead, from [`compat/`](../compat): it boots the
+framework once and handles each request the way the framework's own worker runtime does. Your
+application is not changed; `-framework` picks the entry and `-project-root` says where your
+application is:
 
 ```bash
-PROJECT_ROOT=/path/to/my-symfony-app ./phpworker-gateway compat/symfony.php
+./phpworker-gateway -framework symfony -project-root /path/to/my-symfony-app
 ```
 
-| Framework   | Entry                                                    | Status                                                                                       |
-|-------------|----------------------------------------------------------|----------------------------------------------------------------------------------------------|
-| Symfony     | [`compat/symfony.php`](../compat/symfony.php)            | ✅ one kernel, reset between requests                                                         |
-| CakePHP     | [`compat/cakephp.php`](../compat/cakephp.php)            | ✅ one application, a new container per request                                              |
-| CodeIgniter | [`compat/codeigniter.php`](../compat/codeigniter.php)    | ✅ its own worker mode                                                                        |
-| Gluo 7.0    | [`compat/gluo.php`](../compat/gluo.php)                  | ✅ one `Application` (byjg/gluo-core 7.0; older Gluo projects are not supported)              |
-| Laravel     | [`compat/laravel-fresh.php`](../compat/laravel-fresh.php) | ⚠️ works, but builds a new application per request: little gain, and it needs `-max-requests` (e.g. 100) |
-|             | [`compat/laravel-shared.php`](../compat/laravel-shared.php) | ❌ fast, but leaks the logged-in user to other clients: do not use it; Laravel needs Octane |
+The `PROJECT_ROOT` variable does the same, if you prefer it; `-project-root` wins over it.
+
+| `-framework`     | Status                                                                                       |
+|------------------|----------------------------------------------------------------------------------------------|
+| `symfony`        | ✅ one kernel, reset between requests                                                         |
+| `cakephp`        | ✅ one application, a new container per request                                              |
+| `codeigniter`    | ✅ its own worker mode                                                                        |
+| `gluo`           | ✅ one `Application` (byjg/gluo-core 7.0; older Gluo projects are not supported)              |
+| `laravel-shared` | ✅ one application, its session, login and array cache reset between requests; for state your application changes during a request (config, locale), see [compatibility.md](compatibility.md) |
+| `laravel-fresh`  | ⚠️ builds a new application per request: little gain, and it needs `-max-requests` (e.g. 100) |
 
 Each entry was tested on a real application of that framework, without changing it:
 [compatibility.md](compatibility.md) has the results and what each entry works around.
 
-**Another framework?** Copy the closest entry. It has to do three things: boot the framework once,
-return a function that builds the framework's request from the globals (`PhpWorker::input()` for
-the body) and sends its response, and reset what the framework keeps per request. Look for the
-framework's FrankenPHP or RoadRunner integration: it does the same.
+**Another framework, or a change to an entry?** Write the PHP files out and pass the entry you
+changed, keeping it beside the entries it requires:
+
+```bash
+./phpworker-gateway -extract ./phpworker
+./phpworker-gateway -project-root /path/to/app ./phpworker/compat/my-framework.php
+```
+
+An entry has to do three things: boot the framework once, return a function that builds the
+framework's request from the globals (`PhpWorker::input()` for the body) and sends its response,
+and reset what the framework keeps per request. Look for the framework's FrankenPHP or RoadRunner
+integration: it does the same.
 
 ## 4. The one change in your code
 
@@ -151,6 +163,11 @@ cleanly:
   examples/hello/app.php
 ```
 
+PHP must see `-upload-dir` (the system's temp folder by default, hence `-v /tmp:/tmp`): the gateway
+writes its PHP files there when it starts. Without that, PHP stops with "Could not open input file".
+Environment variables do not reach the container unless you pass them with `-e`; `-project-root`
+does, as it is an argument.
+
 ## What to watch for
 
 The application stays in memory between requests, so:
@@ -166,3 +183,4 @@ The application stays in memory between requests, so:
 - [README](../README.md): every flag, the protocol, how the web functions are redefined
 - [compatibility.md](compatibility.md): how each framework runs, and what was found
 - [benchmark.md](benchmark.md): FPM, the gateway and FrankenPHP compared on a real journey
+- [analysis.md](analysis.md): what those numbers mean, and which server to choose

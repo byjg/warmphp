@@ -1,9 +1,12 @@
-# Benchmark: PHP-FPM against phpworker-gateway
+# Benchmark: PHP-FPM, phpworker-gateway and FrankenPHP
 
 The same user journey, run on the builds of
-[gluo-framework-comparison](https://github.com/byjg/gluo-framework-comparison), served once by
-nginx and PHP-FPM, which boots the application on every request, and once by nginx and
-phpworker-gateway, which keeps it booted in its workers.
+[gluo-framework-comparison](https://github.com/byjg/gluo-framework-comparison), by four servers:
+
+- **fpm**: nginx and PHP-FPM, which boots the application on every request.
+- **worker**: nginx and phpworker-gateway, one booted PHP process per worker.
+- **prefork**: the same with `-prefork`: one boot, forked into the workers.
+- **frankenphp**: FrankenPHP's worker mode, without nginx.
 
 There are two suites:
 
@@ -12,8 +15,7 @@ There are two suites:
 - **api**: each framework as a JSON API in front of Gluo's SPA, the same contract as Gluo's API.
   This one compares like with like: the same endpoints, the same JSON, a JWT everywhere.
 
-And two journeys: **read** (log in, read the list) and **crud** (log in, page through 100
-products, read one, edit it, add one, page through again), [below](#the-crud-journey).
+The conclusions, per server and per framework, are in [analysis.md](analysis.md).
 
 ## The projects
 
@@ -29,186 +31,21 @@ products, read one, edit it, add one, page through again), [below](#the-crud-jou
 | `frameworks/api/codeigniter`       | CodeIgniter 4.7, Shield JWT                     | `compat/codeigniter.php`                                                                                                                                        |
 | `frameworks/api/laravel`           | Laravel 13, Passport (JWT access tokens)        | `compat/laravel-fresh.php` and `compat/laravel-shared.php`                                                                                                      |
 
-The boot files are the same for both suites: they only need the project's root.
+The boot files are the same for both suites, and for FrankenPHP: they only need the project's root.
 [docs/compatibility.md](compatibility.md) explains each one. No application is changed for the
 benchmark.
 
-## The read journey
+## The journey
 
 Every iteration is one visitor, with a new browser (cookies, connections): log in as the seeded
-admin, then read the product list from the database. A journey only counts if the list really has
-products; anything else is an error.
-
-**fullstack** opens the login page first:
-
-| Build       | 1. login page       | 2. log in (and the redirect it answers)            | 3. product list               |
-|-------------|---------------------|----------------------------------------------------|-------------------------------|
-| Symfony     | `GET /login`        | `POST /login`, form with CSRF                      | `GET /product`                |
-| CakePHP     | `GET /users/login`  | `POST /users/login`, form with CSRF                | `GET /products`               |
-| CodeIgniter | `GET /login`        | `POST /login`, form with CSRF                      | `GET /products`               |
-| Laravel     | `GET /login`        | `POST /login`, JSON with XSRF, as Inertia sends it | `GET /products`, Inertia JSON |
-
-**api** (and Gluo in both): the login page is a static file of the SPA, not PHP.
-
-| Build      | 1. login page | 2. log in                          | 3. product list                   |
-|------------|---------------|------------------------------------|-----------------------------------|
-| every API  | —             | `POST /login`, JSON, returns a JWT | `GET /product`, JSON with the JWT |
-
-The code is [`benchmark_test.go`](../benchmark_test.go): the journeys, the two servers and the
-measures. It reuses the browser of the compatibility tests (`compat_test.go`).
-
-## How each side runs
-
-Both sides run in one container of the same Docker image, `byjg/php:8.5-fpm-nginx` (PHP 8.5, its
-`php`, `php-fpm` and `nginx`), with the same user, mounts and environment, **nginx in front** on
-`127.0.0.1:18811`, and **4 PHP processes**:
-
-- **fpm**: `php-fpm` with `pm = static` and 4 children, on a Unix socket; nginx serves the
-  project's public folder and falls back to its front controller (`try_files $uri /index.php?...`),
-  as the image does with `NGINX_ROOT` and `PHP_CONTROLLER`: `public/index.php` (Symfony,
-  CodeIgniter, Laravel), `webroot/index.php` (CakePHP), Gluo's `public/app.php`.
-- **worker**: the gateway (built static, `CGO_ENABLED=0`) on `127.0.0.1:18812`, with `-workers 4`
-  and the boot file of `compat/`; its workers are the image's `php`, as its child processes (the
-  frames go through plain pipes). nginx proxies to it over HTTP/1.1 with keep-alive.
-
-The nginx configuration is the same on both sides except that `location`: the image's defaults
-(worker processes, mime types), no access log, `client_max_body_size 1m` (the gateway's
-`-max-body`). The image's start scripts are not used: they listen on port 80 as the image's user,
-and here nginx and PHP run as the user that owns the projects (they write their caches), on the
-host network (the databases are on `127.0.0.1`). So the benchmark writes the FPM pool and the nginx
-configuration itself, with their temporary files in a folder of its own.
-
-The **memory** column is what `docker stats` shows for that container after the run (without the
-page cache): nginx, and PHP-FPM or the gateway with its workers.
-
-4 clients run the journeys concurrently, after a warm-up of 5 % of the journeys.
-
-OPcache on and off: `-d opcache.enable=0|1 -d opcache.enable_cli=0|1` on both sides (`php-fpm` reads
-`opcache.enable`, the workers' CLI `opcache.enable_cli`).
-
-Settings, given as environment variables (no file changed). Symfony's Dotenv only reads them from
-`$_SERVER` and `$_ENV`: FPM keeps them (`clear_env = no`) and runs with `variables_order=EGPCS`;
-the workers put the environment in `$_SERVER` themselves, as the CLI does. An API build runs with the settings of its full-stack sibling:
-
-| Build       | Environment                                                                                                                                                        |
-|-------------|--------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| Symfony     | `APP_ENV=prod APP_DEBUG=0`                                                                                                                                         |
-| CakePHP     | `DEBUG=false APP_FULL_BASE_URL=http://localhost:8084` (API: `:9083`; CakePHP requires it in production)                                                            |
-| CodeIgniter | none: `development`, as the projects are configured                                                                                                                |
-| Laravel     | `CACHE_STORE=array`, and for the full-stack build `DB_HOST=127.0.0.1 DB_PORT=3307` (its `.env` is Sail's); the array cache removes Fortify's limit of 5 logins per minute, which the database cache keeps across requests |
-| Gluo        | `APP_ENV=dev`                                                                                                                                                      |
-
-Laravel with a new application per request runs with `-max-requests 30`: each application stays in
-memory with its database connection (see [compatibility.md](compatibility.md)), and MySQL accepts
-151 connections.
-
-**Every build hashes passwords with bcrypt**: cost 12, except Symfony, whose `auto` hasher uses
-cost 13 (twice the work). Gluo's users moved from unsalted SHA-1 to bcrypt in Gluo 7.0
-(byjg/authuser), so its login is no longer cheaper than the others'.
-
-## Results: read journey
-
-100 journeys per run, one build at a time. Intel Core Ultra 9 185H (22 CPUs), Docker, PHP 8.5.12.
-MySQL 8.4 for the full-stack Laravel, CakePHP and CodeIgniter builds, 8.0 for the others. The
-memory is with OPcache on.
-
-### api: the same API, journeys per second (higher is better)
-
-| Build               | OPcache on: FPM | worker |       | OPcache off: FPM | worker |       | memory: FPM | worker  |
-|---------------------|----------------:|-------:|------:|-----------------:|-------:|------:|------------:|--------:|
-| Gluo                |            16.4 |   16.2 | ×0.99 |             13.9 |   16.6 | ×1.19 |      48 MiB | 109 MiB |
-| Symfony             |             8.8 |    9.6 | ×1.09 |              7.1 |    9.6 | ×1.35 |      59 MiB | 151 MiB |
-| CakePHP             |            18.3 |   18.7 | ×1.02 |             13.2 |   18.6 | ×1.41 |      53 MiB | 134 MiB |
-| CodeIgniter         |            17.1 |   16.3 | ×0.95 |             13.1 |   16.4 | ×1.25 |      52 MiB | 122 MiB |
-| Laravel, new app    |            13.2 |   13.2 | ×1.00 |              8.0 |   13.3 | ×1.66 |      73 MiB | 241 MiB |
-| Laravel, shared app |            13.2 |   16.1 | ×1.22 |              8.0 |   16.2 | ×2.03 |      73 MiB | 222 MiB |
-
-**Average time of each step** (FPM → worker):
-
-| Build               | OPcache | log in        | product list     |
-|---------------------|---------|---------------|------------------|
-| Gluo                | on      | 224 → 235 ms  | 16.2 → 8.7 ms    |
-| Gluo                | off     | 248 → 230 ms  | 36.2 → 9.2 ms    |
-| Symfony             | on      | 429 → 405 ms  | 17.2 → 5.2 ms    |
-| Symfony             | off     | 478 → 405 ms  | 84.8 → 5.3 ms    |
-| CakePHP             | on      | 207 → 205 ms  | 10.0 → 5.8 ms    |
-| CakePHP             | off     | 248 → 205 ms  | 52.4 → 5.7 ms    |
-| CodeIgniter         | on      | 214 → 226 ms  | 16.0 → 15.1 ms   |
-| CodeIgniter         | off     | 251 → 224 ms  | 52.7 → 14.3 ms   |
-| Laravel, new app    | on      | 263 → 259 ms  | 36.0 → 39.1 ms   |
-| Laravel, new app    | off     | 360 → 259 ms  | 133.4 → 39.3 ms  |
-| Laravel, shared app | on      | 263 → 236 ms  | 36.0 → 8.3 ms    |
-| Laravel, shared app | off     | 360 → 234 ms  | 133.4 → 8.6 ms   |
-
-### fullstack: each framework's own application, journeys per second
-
-| Build               | OPcache on: FPM |         worker |       | OPcache off: FPM |         worker |       | memory: FPM | worker  |
-|---------------------|----------------:|---------------:|------:|-----------------:|---------------:|------:|------------:|--------:|
-| Symfony             |             7.8 |            8.6 | ×1.10 |              5.0 |            8.5 | ×1.70 |      64 MiB | 196 MiB |
-| CakePHP             |            15.2 |           16.2 | ×1.07 |              9.0 |           15.9 | ×1.77 |      61 MiB | 162 MiB |
-| CodeIgniter         |            10.5 |           10.5 | ×1.00 |              6.7 |           10.0 | ×1.49 |      61 MiB | 141 MiB |
-| Laravel, new app    |             2.4 |            2.4 | ×1.00 |              2.1 |            2.3 | ×1.10 |     262 MiB | 441 MiB |
-| Laravel, shared app |             2.4 | ❌ 84 % failed |     — |              2.1 | ❌ 84 % failed |     — |     262 MiB | 413 MiB |
-| Gluo (an API)       |            16.4 |           16.2 | ×0.99 |             13.9 |           16.6 | ×1.19 |      48 MiB | 109 MiB |
-
-**Average time of each step** (FPM → worker):
-
-| Build            | OPcache | login page      | log in          | product list     |
-|------------------|---------|-----------------|-----------------|------------------|
-| Symfony          | on      | 12.6 → 4.7 ms   | 461 → 432 ms    | 32.0 → 19.8 ms   |
-| Symfony          | off     | 77.8 → 5.1 ms   | 609 → 438 ms    | 103.8 → 21.0 ms  |
-| CakePHP          | on      | 6.8 → 4.7 ms    | 232 → 223 ms    | 19.3 → 14.6 ms   |
-| CakePHP          | off     | 43.2 → 5.0 ms   | 320 → 228 ms    | 71.7 → 16.0 ms   |
-| CodeIgniter      | on      | 15.4 → 14.5 ms  | 297 → 304 ms    | 63.0 → 59.1 ms   |
-| CodeIgniter      | off     | 59.7 → 15.7 ms  | 408 → 315 ms    | 118.7 → 63.2 ms  |
-| Laravel, new app | on      | 311 → 304 ms    | 998 → 983 ms    | 365 → 363 ms     |
-| Laravel, new app | off     | 374 → 317 ms    | 1116 → 984 ms   | 429 → 394 ms     |
-
-The whole journey, p50 and p99, is in `benchmark/results.tsv` after a run.
-
-## Reading the read results
-
-- **The login is bcrypt, and it decides the journeys per second.** Cost 12 takes about 200 ms on
-  this machine, whatever the framework or the server; Symfony's cost 13 takes 400 ms, which halves
-  its rate. The worker cannot make it faster. A journey is one login and one list, so with OPcache
-  on the two servers are within 10 % for every build but Laravel's shared app (Gluo and CodeIgniter
-  are 1–5 % slower in the worker, within the noise of one run): compare the steps instead.
-- **The product list is where the frameworks differ.** In the worker, as an API: Symfony 5.2 ms,
-  CakePHP 5.8, Laravel (shared app) 8.3, Gluo 8.7, CodeIgniter 15.1, Laravel (new app) 39. With FPM
-  and OPcache on: CakePHP 10.0 ms, CodeIgniter 16.0, Gluo 16.2, Symfony 17.2, Laravel 36.0.
-  Without OPcache, FPM compiles every file on every request: Gluo 36 ms, CakePHP 52, CodeIgniter 53,
-  Symfony 85, Laravel 133.
-- **The worker removes the boot**: its times barely change with OPcache, while FPM boots on every
-  request. The gain is largest without OPcache (×1.2 to ×2.0 for the API journey) and where the boot
-  is heaviest: Symfony's list goes from 17 to 5 ms with OPcache, from 85 to 5 ms without.
-- **The worker costs memory**: 1.7 to 3.3 times FPM's, 60 to 180 MiB more for 4 processes. Each worker
-  keeps its booted application and its own OPcache (CLI processes do not share it); FPM's children
-  share one OPcache and free the application after every request.
-- **CodeIgniter gains nothing from the worker with OPcache on** (list 16.0 → 15.1 ms): most of its
-  work happens on every request, booted or not.
-- **The same framework is faster as an API** than as a full application: the list in the worker
-  goes from 19.8 to 5.2 ms (Symfony), 14.6 to 5.8 (CakePHP), 59 to 15 (CodeIgniter, whose debug
-  toolbar is injected into HTML pages only) and 363 to 39 ms (Laravel, new app). An API skips the
-  session, the templates and, for Laravel, Inertia.
-- **Laravel with a new application per request is no faster than FPM** with OPcache on, in both
-  suites: it only keeps the autoloader warm, and `-max-requests 30` replaces each worker every 30
-  requests (a cold boot).
-- **Laravel with one shared application**: the full-stack build fails (84 of 100 logins answer 429:
-  Fortify's login limiter keeps its counter in the shared application's memory, one of the leaks in
-  [compatibility.md](compatibility.md)), but **the API build works** and is Laravel's best result
-  (16.1 journeys/s, list 8.3 ms): it has no login limiter and no CSRF token. Passport's token is
-  still checked in the database on every request.
-
-## The crud journey
-
-The read journey is one login and one list of 5 products, so it mostly measures bcrypt. The crud
-journey keeps the login and adds reads and writes on a bigger table. Each framework does every
-step the way it does it; no application is changed.
+admin, then a whole CRUD session. A journey only counts if every step did what it should (the list
+has its products, the new price is there, the new product appears); anything else is an error.
+Each framework does every step the way it does it; no application is changed.
 
 | # | Step     | fullstack                                                             | api (and Gluo)                     |
 |---|----------|-----------------------------------------------------------------------|------------------------------------|
 | 1 | page     | the login page                                                        | — (a static file of the SPA)       |
-| 2 | login    | as in the read journey                                                | as in the read journey             |
+| 2 | login    | the login form, with its CSRF token, and the redirect it answers      | `POST /login`, returns a JWT       |
 | 3 | list1    | the product list, page 1                                              | `GET /product?page=0&size=50`      |
 | 4 | list2    | the product list, page 2                                              | `GET /product?page=1&size=50`      |
 | 5 | get      | the edit page of a random product (1–100)                             | `GET /product/{id}`                |
@@ -239,119 +76,195 @@ product, so a run ends with about 205.
 |-------------|----------------------------------------------------------------------------------------------------|
 | Symfony     | `doctrine:schema:drop --force --full-database`, `doctrine:migrations:migrate`, `doctrine:fixtures:load` |
 | CakePHP     | `migrations rollback -t 0`, `migrations migrate`, `seeds run -q -f`                                |
-| CodeIgniter | `spark migrate:refresh --all -f`, `spark db:seed ProductSeeder`                                    |
-| Laravel     | `artisan migrate:fresh --seed --force`                                                             |
+| CodeIgniter | `spark migrate:refresh --all -f`, `spark db:seed ProductSeeder`, and the files of `writable/debugbar` and `writable/session` |
+| Laravel     | `artisan migrate:fresh --seed --force`, and `storage/inertia-devtools`                             |
 | Gluo        | `gluo --env=dev migrate:reset`                                                                     |
 
 Symfony's fixtures are loaded into a recreated schema, not with `--purge-with-truncate`: MySQL
 commits on `TRUNCATE`, which breaks Doctrine's transaction.
 
-### Results: crud journey, journeys per second (higher is better)
+Two development tools write a file per request, and they stay on, as the projects are configured;
+only their folders are cleared. Inertia's DevTools matters most: on every request it rewrites an
+index of all its entries, under a lock. With 11,000 entries that is 3.9 MB per request, and full-stack
+Laravel ran three times slower, with results that changed by up to 221 % between rounds.
 
-100 journeys per run, one build at a time, same machine and settings as above. The memory is with
-OPcache on.
+## How each server runs
+
+**fpm**, **worker** and **prefork** run in one container of the same Docker image,
+`byjg/php:8.5-fpm-nginx` (Alpine, PHP 8.5.12 NTS, its `php`, `php-fpm` and `nginx`), with the same
+user, mounts and environment, **nginx in front** on `127.0.0.1:18811`, and **4 PHP processes**:
+
+- **fpm**: `php-fpm` with `pm = static` and 4 children, on a Unix socket; nginx serves the
+  project's public folder and falls back to its front controller (`try_files $uri /index.php?...`),
+  as the image does with `NGINX_ROOT` and `PHP_CONTROLLER`: `public/index.php` (Symfony,
+  CodeIgniter, Laravel), `webroot/index.php` (CakePHP), Gluo's `public/app.php`.
+- **worker**: the gateway (built static, `CGO_ENABLED=0`) on `127.0.0.1:18812`, with `-workers 4`
+  and the boot file of `compat/`; its workers are the image's `php`, as its child processes (the
+  frames go through plain pipes). nginx proxies to it over HTTP/1.1 with keep-alive.
+- **prefork**: the same with `-prefork`; the workers are forks of one booted master, and talk to
+  the gateway over a Unix socket.
+
+The nginx configuration is the same for the three except that `location`: the image's defaults
+(worker processes, mime types), no access log, `client_max_body_size 1m` (the gateway's
+`-max-body`). The image's start scripts are not used: they listen on port 80 as the image's user,
+and here nginx and PHP run as the user that owns the projects (they write their caches), on the
+host network (the databases are on `127.0.0.1`). So the benchmark writes the FPM pool and the nginx
+configuration itself, with their temporary files in a folder of its own.
+
+**frankenphp** runs in its own image, [`benchmark/frankenphp/Dockerfile`](../benchmark/frankenphp/Dockerfile):
+`dunglas/frankenphp:1-php8.5` (Debian, PHP 8.5.11 ZTS) with the extensions the projects need, and a
+Caddyfile of its own: 4 workers, no admin API, no HTTPS, no compression. Caddy also serves the static
+files, so nginx is not there. Its worker script is [`compat/frankenphp.php`](../compat/frankenphp.php),
+which runs the same boot files of `compat/`.
+
+**The two PHP builds are not equally fast**, which matters for the comparison. On this machine, in
+the same CPU test, one process:
+
+| PHP build                 | bcrypt, cost 12 | integer loop | md5 |
+|---------------------------|----------------:|-------------:|----:|
+| byjg (Alpine, NTS)        |        170.5 ms |       194 ms | 394 ms |
+| FrankenPHP (Debian, ZTS)  |        161.0 ms |       209 ms | 379 ms |
+
+So FrankenPHP's login is about 5 % faster whatever the server does.
+
+The **memory** column is what `docker stats` shows for that container after the run (without the
+page cache): nginx, and PHP-FPM or the gateway with its workers; or FrankenPHP alone. nginx with
+this configuration and nothing behind it takes 18.6 MiB on this machine, because it starts one
+process per CPU (22); with 4 processes, 6.3 MiB.
+
+4 clients run the journeys concurrently, after a warm-up of 5 % of the journeys.
+
+OPcache on and off: `-d opcache.enable=0|1 -d opcache.enable_cli=0|1`. Xdebug is off
+(`-d xdebug.mode=off`): the byjg image loads it, in `develop` mode.
+
+Settings, given as environment variables (no file changed). Symfony's Dotenv only reads them from
+`$_SERVER` and `$_ENV`: FPM keeps them (`clear_env = no`) and runs with `variables_order=EGPCS`;
+the workers put the environment in `$_SERVER` themselves, as the CLI does. An API build runs with the settings of its full-stack sibling:
+
+| Build       | Environment                                                                                                                                                        |
+|-------------|--------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| Symfony     | `APP_ENV=prod APP_DEBUG=0`                                                                                                                                         |
+| CakePHP     | `DEBUG=false APP_FULL_BASE_URL=http://localhost:8084` (API: `:9083`; CakePHP requires it in production)                                                            |
+| CodeIgniter | none: `development`, as the projects are configured                                                                                                                |
+| Laravel     | `CACHE_STORE=array`, and for the full-stack build `DB_HOST=127.0.0.1 DB_PORT=3307` (its `.env` is Sail's); the array cache removes Fortify's limit of 5 logins per minute, which the database cache keeps across requests |
+| Gluo        | `APP_ENV=dev`                                                                                                                                                      |
+
+Laravel with a new application per request runs with `-max-requests 30`: each application stays in
+memory with its database connection (see [compatibility.md](compatibility.md)), and MySQL accepts
+151 connections.
+
+**Every build hashes passwords with bcrypt**: cost 12, except Symfony, whose `auto` hasher uses
+cost 13 (twice the work). Gluo's users moved from unsalted SHA-1 to bcrypt in Gluo 7.0
+(byjg/authuser), so its login is no longer cheaper than the others'.
+
+## Results
+
+100 journeys per run, one build at a time, with only that build's database up: 84 runs, 3 rounds
+each, 25,200 journeys, **no failed journey**. Each row is the round with the median journeys/s; the
+`spread` column of [`benchmark/results.tsv`](../benchmark/results.tsv) is the difference between the rounds:
+at most 8 %, except FPM with full-stack CakePHP (14 %: 11.3 to 13.0 journeys/s), so read a
+difference under about 5 % as a tie. Each round is also in `benchmark/results-round<n>.tsv`.
+Intel Core Ultra 9 185H (22 CPUs), 30 GB, Docker. MySQL 8.4 for the full-stack Laravel, CakePHP and
+CodeIgniter builds, 8.0 for the others. A journey's login is bcrypt, about half of it or more, so
+the "7 steps" tables below show the frameworks and the servers better.
+
+The full-stack Laravel rows were run again after the reset of `storage/inertia-devtools` was added;
+nothing else depends on it. The machine slept during round 2's Symfony runs; Symfony's spread is
+2–7 %.
+
+### Journeys per second (higher is better)
 
 **api**
 
-| Build               | OPcache on: FPM | worker |       | OPcache off: FPM | worker |       | memory: FPM | worker  |
-|---------------------|----------------:|-------:|------:|-----------------:|-------:|------:|------------:|--------:|
-| Gluo                |            12.5 |   14.7 | ×1.18 |              8.1 |   14.4 | ×1.78 |      48 MiB | 110 MiB |
-| Symfony             |             7.2 |    8.5 | ×1.18 |              3.6 |    8.6 | ×2.39 |      61 MiB | 165 MiB |
-| CakePHP             |            12.9 |   15.5 | ×1.20 |              5.8 |   15.0 | ×2.59 |      55 MiB | 164 MiB |
-| CodeIgniter         |            10.9 |   11.0 | ×1.01 |              5.8 |   11.6 | ×2.00 |      55 MiB | 128 MiB |
-| Laravel, new app    |             7.2 |    6.3 | ×0.88 |              3.0 |    6.9 | ×2.30 |      74 MiB | 225 MiB |
-| Laravel, shared app |             7.2 |   12.1 | ×1.68 |              3.0 |   12.2 | ×4.07 |      74 MiB | 225 MiB |
+| Build               | OPcache on: fpm | worker | prefork | frankenphp | OPcache off: fpm | worker | prefork | frankenphp |
+|---------------------|----------------:|-------:|--------:|-----------:|-----------------:|-------:|--------:|-----------:|
+| Gluo                |            15.7 |   17.0 |    17.1 |       18.0 |              9.6 |   17.0 |    17.0 |       17.8 |
+| Symfony             |             8.5 |    9.3 |     9.4 |        9.9 |              4.2 |    9.2 |     9.2 |        9.8 |
+| CakePHP             |            16.2 |   16.9 |    17.5 |       18.5 |              7.0 |   17.3 |    17.4 |       18.2 |
+| CodeIgniter         |            14.9 |   15.3 |    15.2 |       15.7 |              7.4 |   15.0 |    15.2 |       15.4 |
+| Laravel, new app    |            12.6 |    9.7 |    12.0 |       13.3 |              3.9 |   10.3 |    10.3 |       11.4 |
+| Laravel, shared app |            12.6 |   14.7 |    14.9 |       15.7 |              3.9 |   14.8 |    14.7 |       15.6 |
 
-**fullstack**
+**fullstack** (Gluo is the API above)
 
-| Build               | OPcache on: FPM |         worker |       | OPcache off: FPM |         worker |       | memory: FPM | worker  |
-|---------------------|----------------:|---------------:|------:|-----------------:|---------------:|------:|------------:|--------:|
-| Symfony             |             5.8 |            6.9 | ×1.19 |              2.3 |            6.8 | ×2.96 |      68 MiB | 213 MiB |
-| CakePHP             |             8.8 |            9.9 | ×1.13 |              3.8 |            9.9 | ×2.61 |      60 MiB | 175 MiB |
-| CodeIgniter         |             4.7 |            4.5 | ×0.96 |              2.4 |            4.9 | ×2.04 |      68 MiB | 147 MiB |
-| Laravel, new app    |             1.0 |            1.0 | ×1.00 |              0.8 |            0.9 | ×1.13 |     241 MiB | 450 MiB |
-| Laravel, shared app |             1.0 | ❌ 84 % failed |     — |              0.8 | ❌ 84 % failed |     — |     241 MiB | 406 MiB |
-| Gluo (an API)       |            12.5 |           14.7 | ×1.18 |              8.1 |           14.4 | ×1.78 |      48 MiB | 110 MiB |
+| Build               | OPcache on: fpm | worker | prefork | frankenphp | OPcache off: fpm | worker | prefork | frankenphp |
+|---------------------|----------------:|-------:|--------:|-----------:|-----------------:|-------:|--------:|-----------:|
+| Symfony             |             7.3 |    8.8 |     8.7 |        9.0 |              2.8 |    8.3 |     8.4 |        8.9 |
+| CakePHP             |            12.1 |   14.2 |    14.0 |       15.1 |              4.6 |   13.6 |    13.7 |       14.6 |
+| CodeIgniter         |             9.4 |   10.3 |    10.5 |       10.4 |              4.2 |    9.7 |     9.7 |        9.8 |
+| Laravel, new app    |             5.4 |    4.5 |     5.1 |        5.4 |              2.1 |    4.5 |     4.5 |        4.8 |
+| Laravel, shared app |             5.4 |    5.7 |     5.8 |        5.9 |              2.1 |    5.7 |     5.6 |        5.8 |
 
-**Average time of each step**, worker and OPcache on. "7 steps" is the sum of the steps after the
-login (list1 to relist2), the framework's own work; the last column is the same sum with FPM and
-OPcache on.
+### The 7 steps after the login, ms (lower is better)
 
-| api                 | log in | list1   | list2   | get     | edit    | add     | 7 steps | 7 steps, FPM |
-|---------------------|-------:|--------:|--------:|--------:|--------:|--------:|--------:|-------------:|
-| Gluo                | 216 ms | 8.8 ms  | 8.4 ms  | 1.6 ms  | 10.2 ms | 9.0 ms  |   55 ms |        95 ms |
-| Symfony             | 412 ms | 6.3 ms  | 5.6 ms  | 3.0 ms  | 12.6 ms | 10.3 ms |   48 ms |       125 ms |
-| CakePHP             | 207 ms | 6.2 ms  | 5.6 ms  | 3.4 ms  | 12.9 ms | 10.9 ms |   50 ms |        88 ms |
-| CodeIgniter         | 230 ms | 16.8 ms | 16.2 ms | 15.1 ms | 24.1 ms | 22.6 ms |  127 ms |       136 ms |
-| Laravel, new app    | 283 ms | 54.9 ms | 47.2 ms | 42.7 ms | 50.2 ms | 45.6 ms |  326 ms |       278 ms |
-| Laravel, shared app | 242 ms | 14.2 ms | 14.0 ms | 4.6 ms  | 14.2 ms | 11.7 ms |   86 ms |       278 ms |
+The sum of the average time of list1 to relist2: the framework's own work, without bcrypt.
 
-| fullstack           | page    | log in | list1   | list2   | get     | edit    | add     | 7 steps  | 7 steps, FPM |
-|---------------------|--------:|-------:|--------:|--------:|--------:|--------:|--------:|---------:|-------------:|
-| Symfony             | 4.9 ms  | 424 ms | 17.0 ms | 16.7 ms | 8.7 ms  | 30.3 ms | 35.8 ms |   142 ms |       243 ms |
-| CakePHP             | 4.8 ms  | 223 ms | 25.7 ms | 25.9 ms | 6.7 ms  | 26.0 ms | 29.3 ms |   165 ms |       210 ms |
-| CodeIgniter         | 17.7 ms | 342 ms | 69.0 ms | 67.1 ms | 22.8 ms | 96.5 ms | 115 ms  |   516 ms |       511 ms |
-| Laravel, new app    | 248 ms  | 868 ms | 366 ms  | 369 ms  | 280 ms  | 680 ms  | 659 ms  |  3047 ms |      2926 ms |
+| Build                 | OPcache on: fpm | worker | prefork | frankenphp | OPcache off: fpm | worker | prefork | frankenphp |
+|-----------------------|----------------:|-------:|--------:|-----------:|-----------------:|-------:|--------:|-----------:|
+| Gluo                  |              48 |     28 |      26 |         26 |              184 |     26 |      29 |         26 |
+| Symfony API           |              71 |     37 |      36 |         31 |              494 |     36 |      37 |         33 |
+| CakePHP API           |              54 |     37 |      36 |         31 |              331 |     36 |      37 |         32 |
+| CodeIgniter API       |              74 |     64 |      67 |         64 |              304 |     65 |      64 |         69 |
+| Laravel API, new app  |              93 |    160 |     106 |         85 |              707 |    138 |     148 |        124 |
+| Laravel API, shared   |              93 |     49 |      48 |         43 |              707 |     50 |      50 |         46 |
+| Symfony full-stack    |             129 |     69 |      68 |         60 |              829 |     71 |      70 |         63 |
+| CakePHP full-stack    |             126 |     82 |      82 |         72 |              531 |     84 |      84 |         73 |
+| CodeIgniter full-stack |            183 |    151 |     144 |        152 |              582 |    165 |     163 |        164 |
+| Laravel full-stack, new app |       288 |    389 |     306 |        285 |             1140 |    384 |     375 |        346 |
+| Laravel full-stack, shared |        288 |    244 |     236 |        235 |             1140 |    250 |     252 |        245 |
 
-The whole journey, p50 and p99, and every setting are in `benchmark/results-crud.tsv` after a run.
+### Memory, MiB (lower is better)
 
-### Who wins what
+The whole container, with 4 PHP processes. FPM, worker and prefork include nginx (18.6 MiB here);
+FrankenPHP is alone.
 
-One run of 100 journeys per setting: a difference under about 10 % is a tie.
+| Build                 | OPcache on: fpm | worker | prefork | frankenphp | OPcache off: fpm | worker | prefork | frankenphp |
+|-----------------------|----------------:|-------:|--------:|-----------:|-----------------:|-------:|--------:|-----------:|
+| Gluo                  |              47 |    109 |      59 |         49 |               59 |     93 |      63 |         58 |
+| Symfony API           |              61 |    162 |      84 |         68 |               96 |    142 |     112 |         99 |
+| CakePHP API           |              53 |    159 |      96 |         63 |               75 |    141 |     110 |         77 |
+| CodeIgniter API       |              55 |    127 |      70 |         60 |               75 |    108 |      78 |         74 |
+| Laravel API, new app  |              73 |    230 |     100 |        110 |              143 |    143 |     178 |        178 |
+| Laravel API, shared   |              73 |    221 |     106 |        101 |              143 |    181 |     115 |        147 |
+| Symfony full-stack    |              67 |    208 |     116 |         82 |              105 |    184 |     150 |        125 |
+| CakePHP full-stack    |              61 |    172 |     106 |         69 |               81 |    151 |     119 |         88 |
+| CodeIgniter full-stack |             68 |    149 |      89 |         77 |               90 |    134 |     104 |        100 |
+| Laravel full-stack, new app |        99 |    304 |     180 |        201 |              169 |    269 |     178 |        289 |
+| Laravel full-stack, shared |         99 |    258 |     137 |        134 |              169 |    218 |     148 |        184 |
 
-**Best overall (journeys per second)**: **CakePHP API**, 15.5 in the worker and 12.9 with FPM,
-then Gluo (14.7 / 12.5), Laravel API with a shared app (12.1, worker only), CodeIgniter API
-(11.0 / 10.9), CakePHP full-stack (9.9 / 8.8) and Symfony API (8.5 / 7.2). CakePHP is first mostly
-because its login is the cheapest (207 ms against Gluo's 216): the steps after it barely separate
-the two.
+Laravel with a new application per request is measured at whatever point `-max-requests 30` left it,
+so its memory moves between rounds (178 to 240 MiB, full-stack prefork with OPcache off).
 
-| Category                                    | Winner                                  | Numbers                                                                                     |
-|---------------------------------------------|-----------------------------------------|---------------------------------------------------------------------------------------------|
-| Fastest framework code, worker              | tie: **Symfony API, CakePHP API**, Gluo | 48 / 50 / 55 ms for the 7 steps                                                             |
-| Fastest framework code, FPM + OPcache       | tie: **CakePHP API, Gluo**              | 88 / 95 ms; Symfony 125, CodeIgniter 136                                                    |
-| Without OPcache, FPM                        | **Gluo**                                | 8.1 journeys/s against 5.8 for CakePHP and CodeIgniter; 246 ms for the 7 steps against 408–419 |
-| Read one product                            | **Gluo**                                | 1.6 ms; Symfony 3.0, CakePHP 3.4                                                            |
-| Writes (edit + add)                         | **Gluo**                                | 10.2 + 9.0 ms; Symfony 12.6 + 10.3, CakePHP 12.9 + 10.9                                     |
-| Pages of 50 products                        | **Symfony API, CakePHP API**            | 5.6–6.3 ms; Gluo 8.4–8.8                                                                    |
-| Least memory                                | **Gluo**, on both servers               | 48 MiB with FPM, 110 MiB in the worker; the other APIs 55–74 and 128–225                    |
-| Largest gain from the worker                | **Laravel, shared app**                 | 278 → 86 ms for the 7 steps (×3.2); Symfony ×2.6, CakePHP ×1.8, Gluo ×1.7                    |
-| Steadiest (p99 against p50, API, OPcache on) | **CakePHP API**                        | p99 = 1.11 × p50 with FPM, 1.17 in the worker; CodeIgniter 1.7–1.9, Laravel new app 2.0     |
-| Best full-stack build                       | **CakePHP**                             | 9.9 journeys/s; Symfony's steps are faster (142 against 165 ms), but its login costs 424 ms |
-| Slowest                                     | **Laravel full-stack**                  | 1.0 journey/s: every list sends the whole table through Inertia, about 360 ms each          |
+### Each step, OPcache on
 
-### Reading the crud results
+Prefork and FrankenPHP, in ms. "page" is the login page, `list1` and `list2` are 50 products.
 
-- **The login still decides the journeys per second.** It is 200–420 ms of bcrypt against 50–150 ms
-  for the 7 other steps in the worker. Symfony hashes with cost 13 (`auto`), about 200 ms more per
-  login; at cost 12 its API would be near 15 journeys/s, level with CakePHP (an estimate, not
-  measured).
-- **With OPcache on, the worker saves 40 to 80 ms per journey** on the APIs that keep their
-  application booted (Gluo, Symfony, CakePHP; 190 ms for Laravel's shared app): ×1.2 the journeys
-  per second (×1.7 for Laravel), ×1.7 to ×3.2 on the 7 steps. Without OPcache FPM compiles every
-  file on every request, and the worker is ×1.8 to ×4 faster on the APIs, since its times do not
-  change with OPcache.
-- **Gluo, Symfony and CakePHP are level as APIs in the worker**, about 50 ms for 7 steps. Gluo is
-  ahead on the single read and the writes, Symfony and CakePHP on the pages of 50. With FPM, Gluo
-  and CakePHP are level (95 / 88 ms) and Symfony pays for its boot (125 ms).
-- **The memory is the worker's price**: 1.9 to 3.1 times FPM's, 60 to 210 MiB more for 4 processes:
-  about 15 MiB more per worker for Gluo, 25–30 for the Symfony and CakePHP APIs, 35–50 for Laravel. Each worker
-  keeps its booted application and its own OPcache; FPM's children share one OPcache and free the
-  application after every request.
-- **CodeIgniter gains nothing from the worker with OPcache on** (136 → 127 ms as an API, 511 → 516 as
-  a full application): most of its work happens on every request, booted or not. It also has the
-  widest tails after Laravel's new app (p99 up to 2.5 × p50).
-- **Laravel depends on how it runs in the worker.** With a new application per request it is slower
-  than FPM (326 against 278 ms) and uses three times the memory; with one shared application it is
-  the third API (86 ms). The full-stack shared application still fails on Fortify's login limiter
-  (429), as in the read journey.
-- **Full-stack costs follow the list.** The builds without paging pay for the whole table on each of
-  the four list pages and on each redirect after a save: Laravel's Inertia JSON (about 360 ms) more
-  than Symfony's Twig (17 ms). CodeIgniter pages but renders its debug toolbar in `development`
-  (about 68 ms a page).
+| Build                  | Server     | page | log in | list1 | list2 | get  | edit | add  | 7 steps |
+|------------------------|------------|-----:|-------:|------:|------:|-----:|-----:|-----:|--------:|
+| Gluo                   | prefork    |    — |    206 |   2.7 |   2.4 |  1.0 |  7.9 |  8.0 |      26 |
+|                        | frankenphp |    — |    196 |   2.3 |   2.0 |  0.8 |  8.4 |  8.2 |      26 |
+| Symfony API            | prefork    |    — |    388 |   4.1 |   3.4 |  2.2 | 12.1 |  9.1 |      36 |
+|                        | frankenphp |    — |    369 |   3.1 |   2.5 |  1.6 | 11.0 |  8.5 |      31 |
+| CakePHP API            | prefork    |    — |    192 |   3.6 |   3.3 |  2.2 | 12.2 |  9.3 |      36 |
+|                        | frankenphp |    — |    183 |   2.9 |   2.6 |  1.8 | 10.9 |  8.6 |      31 |
+| CodeIgniter API        | prefork    |    — |    195 |  10.0 |   7.5 |  6.2 | 17.1 | 14.1 |      67 |
+|                        | frankenphp |    — |    189 |   7.8 |   7.0 |  6.3 | 16.3 | 13.2 |      64 |
+| Laravel API, shared    | prefork    |    — |    220 |   6.1 |   5.6 |  3.3 | 11.9 | 10.7 |      48 |
+|                        | frankenphp |    — |    211 |   5.4 |   4.9 |  2.9 | 10.8 |  9.9 |      43 |
+| Symfony full-stack     | prefork    |  2.7 |    386 |   7.0 |   6.5 |  4.3 | 18.2 | 19.7 |      68 |
+|                        | frankenphp |  2.4 |    377 |   6.0 |   5.9 |  4.3 | 16.4 | 16.9 |      60 |
+| CakePHP full-stack     | prefork    |  2.4 |    201 |  10.5 |  10.1 |  3.7 | 19.1 | 18.4 |      82 |
+|                        | frankenphp |  2.0 |    190 |   9.8 |   9.5 |  3.2 | 16.4 | 15.8 |      72 |
+| CodeIgniter full-stack | prefork    |  5.7 |    229 |  17.1 |  17.4 |  8.2 | 30.3 | 37.7 |     144 |
+|                        | frankenphp |  6.4 |    224 |  17.8 |  18.1 |  9.1 | 32.6 | 39.5 |     152 |
+| Laravel full-stack, shared | prefork | 14.8 |   436 |  33.6 |  33.9 |  8.9 | 47.2 | 46.3 |     236 |
+|                        | frankenphp | 13.5 |    420 |  33.0 |  33.8 |  8.0 | 46.7 | 46.2 |     235 |
 
-### Screenshots
+Every step of every run, with p50, p99 and the CPU, is in [`benchmark/results.tsv`](../benchmark/results.tsv).
 
-Taken after each build's crud run: the login page and the product list, with
+## Screenshots
+
+Taken after each build's run: the login page and the product list, with
 the prices the journeys edited and the `Bench …` products they added. Each list keeps its own
 order: Symfony and CakePHP by id, CodeIgniter and Gluo by name, Laravel newest first. The API
 builds have none: they all serve Gluo's SPA, unchanged, so their pages look like Gluo's.
@@ -402,11 +315,14 @@ php frameworks/api/contract-test.php http://localhost:9081 http://localhost:7081
 Then, from this repository:
 
 ```bash
-BENCH_JOURNEYS=10 go test -tags compat -run TestBenchmark -v ./...                       # smoke run
-BENCH_JOURNEYS=100 go test -tags compat -run TestBenchmark -v -timeout 90m ./...         # these results, both suites
-BENCH_SUITE=api BENCH_JOURNEYS=100 go test -tags compat -run TestBenchmark -v ./...      # one suite (Gluo is in both)
-BENCH_JOURNEY=crud BENCH_ONLY=api-cakephp BENCH_JOURNEYS=100 go test -tags compat -run TestBenchmark -v ./...  # the crud journey, one build
+BENCH_JOURNEYS=10 BENCH_ONLY=gluo make benchmark                # a smoke run of one build; its database must be up
+BENCH_CLIENTS=4 BENCH_JOURNEYS=100 benchmark/rounds.sh 3        # these results: about 1 h 30
+python3 benchmark/median.py                                     # benchmark/results.tsv, from the rounds
 ```
+
+`rounds.sh` starts each build's database, waits for it, runs the build, stops it, and keeps each
+round in `benchmark/results-round<n>.tsv`. Run it on a quiet machine, and stop it from sleeping:
+the `cpu` and `steal` columns help to spot a disturbed run.
 
 | Variable          | Default                              |                                                                                   |
 |-------------------|--------------------------------------|-----------------------------------------------------------------------------------|
@@ -417,16 +333,15 @@ BENCH_JOURNEY=crud BENCH_ONLY=api-cakephp BENCH_JOURNEYS=100 go test -tags compa
 | `BENCH_SERVERS`   | `fpm,worker,prefork,frankenphp`      | the servers to run, comma separated                                               |
 | `BENCH_PHP_INI`   | `xdebug.mode=off`                    | PHP settings for every server, space separated (`name=value`); the image loads Xdebug |
 | `BENCH_IMAGE`     | `byjg/php:8.5-fpm-nginx`             | the image of FPM and the gateway: php, php-fpm and nginx                          |
+| `BENCH_GATEWAY`   |                                      | a gateway binary already built (default: `go build`)                              |
 | `COMPAT_DIR`      | `../gluo-framework-comparison`       | the comparison repository (the compatibility tests read it too)                   |
 
 The benchmark sets two more for FrankenPHP's worker script (`compat/frankenphp.php`):
 `PHPWORKER_BOOT`, the boot file of `compat/` it runs, and `PHPWORKER_MAX_REQUESTS`, the build's
 `-max-requests` (it ends the script after that many requests, and FrankenPHP starts it again).
 
-100 journeys per run take about 25 minutes for the read journey and 45 for the crud journey, both
-suites. `results.tsv` (read) and `results-crud.tsv` (crud) are rewritten unless `BENCH_ONLY` is set,
-which appends. The results above were run one build at a time, with `BENCH_SUITE` and `BENCH_ONLY`. The crud journey resets the
-databases before every run (see [The crud journey](#the-crud-journey)): it erases what they had. The full-stack Laravel
-shared-application runs fail by design (see above), so `go test` reports FAIL for them. The run
-writes to the projects' ignored folders and databases: sessions (Laravel's `sessions` table, CodeIgniter's
-`writable/session`), Passport's tokens (`oauth_access_tokens`) and logs.
+The benchmark resets the databases before every run (see [The data](#the-journey)): it erases what
+they had. It writes to the projects' ignored folders and databases: sessions (Laravel's `sessions`
+table, CodeIgniter's `writable/session`), Passport's tokens (`oauth_access_tokens`) and logs. It also
+rewrites the tracked `config/Migrations/schema-dump-default.lock` of both CakePHP builds: restore it
+with `git checkout` afterwards.

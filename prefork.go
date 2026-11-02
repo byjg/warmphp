@@ -31,6 +31,10 @@ func (p *pool) startMaster() error {
 	cfg := p.cfg
 	// In the upload directory: PHP must see it (the PHP command may be a container)
 	socket := filepath.Join(cfg.uploadDir, fmt.Sprintf("phpworker-%d.sock", os.Getpid()))
+	command, err := cfg.phpCommand(socket, strconv.Itoa(cfg.workers))
+	if err != nil {
+		return err
+	}
 	_ = os.Remove(socket)
 	listener, err := net.Listen("unix", socket)
 	if err != nil {
@@ -42,9 +46,7 @@ func (p *pool) startMaster() error {
 		listener.Close()
 		return err
 	}
-	args := append(append([]string{}, cfg.php[1:]...), "-d", "disable_functions="+cfg.disableFunctions,
-		cfg.workerScript, cfg.mode, cfg.entry, socket, strconv.Itoa(cfg.workers))
-	cmd := exec.Command(cfg.php[0], args...)
+	cmd := exec.Command(command[0], command[1:]...)
 	// The workers answer on their connections: anything on stdout is stray output
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = stdinR, os.Stderr, os.Stderr
 	err = cmd.Start()

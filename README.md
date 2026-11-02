@@ -112,8 +112,14 @@ curl 'localhost:8080/hello?name=joao'
 ## Existing frameworks
 
 Symfony, CakePHP, Laravel, CodeIgniter and Gluo (7.0, through gluo-core's `Application`) were tested without changing them, through the boot files in
-[`compat/`](compat). [docs/compatibility.md](docs/compatibility.md) lists what worked, what each
-framework needs and the leaks found.
+[`compat/`](compat), which the binary carries:
+
+```bash
+./phpworker-gateway -framework symfony -project-root /path/to/my-symfony-app
+```
+
+[docs/compatibility.md](docs/compatibility.md) lists what worked, what each framework needs and the
+leaks found.
 
 ## Benchmark
 
@@ -123,20 +129,26 @@ gateway (with and without `-prefork`) and by FrankenPHP's worker mode, with OPca
 `make benchmark` runs it; it takes hours, and its `BENCH_*` variables select what runs, e.g.
 `make benchmark BENCH_ONLY=gluo BENCH_JOURNEYS=10`.
 
+[docs/analysis.md](docs/analysis.md) has the conclusions: the strengths and weaknesses of each server,
+and the best choice for each framework.
+
 ## Options
 
 | Flag             | Default          | Description                                                          |
 |------------------|------------------|----------------------------------------------------------------------|
 | `-listen`        | `:8080`          | Address to listen on                                                 |
 | `-php`           | `php`            | Command that runs the PHP CLI; may include arguments                 |
-| `-worker`        | `php/worker.php` | Path to the worker script                                            |
+| `-worker`        | embedded         | Path to a worker script to use instead of the embedded one           |
+| `-framework`     |                  | Runs the embedded entry of this framework, instead of an entry file: `cakephp`, `codeigniter`, `gluo`, `laravel-fresh`, `laravel-shared` or `symfony` |
+| `-project-root`  |                  | The application's folder, given to PHP as `PROJECT_ROOT`; overrides that variable |
+| `-extract`       |                  | Writes the embedded PHP files to this folder, which must be empty, and exits |
 | `-mode`          | `callable`       | `callable` or `script`                                               |
 | `-workers`       | number of CPUs   | Number of PHP processes                                              |
 | `-max-requests`  | `0`              | Replace a worker after this many requests (0 = never)                |
 | `-timeout`       | `30s`            | Maximum time to wait for a worker and process a request (then 504 and the worker is killed) |
 | `-boot-timeout`  | `30s`            | Maximum time for a worker to boot                                    |
 | `-max-body`      | `32MiB`          | Maximum request body (413 above it)                                  |
-| `-upload-dir`    | system temp dir  | Where uploaded files are written; PHP must see the same path         |
+| `-upload-dir`    | system temp dir  | Where uploaded files and the embedded PHP files are written; PHP must see the same path |
 | `-prefork`       | off              | Boot once in a master that forks the workers (see below); needs `pcntl` |
 
 Running PHP in Docker works too. Use `--init`, so PHP is not PID 1 and stops on SIGTERM, and use `-i`
@@ -148,12 +160,22 @@ for stdin:
   examples/hello/app.php
 ```
 
+## Embedded files
+
+The binary carries `php/` and `compat/`, so it needs no file beside it. PHP can only run real files,
+so the gateway writes them to a new folder with a random name inside `-upload-dir`, puts back any that
+are missing before it starts a PHP process (a `/tmp` cleaner may delete them from a gateway that runs
+for weeks), and removes the folder when it stops. A gateway that is killed leaves it behind.
+
+`-worker` and an entry file take the place of the embedded ones, and `-extract` writes them out to be
+changed. After changing `php/` or `compat/` in this repository, run `make build` or pass the files.
+
 ## Pre-fork
 
 Without `-prefork`, every worker is a `php` process of its own: it boots the application, and the
 CLI gives it its own OPcache. With `-prefork`, one master process boots the application and forks
 the workers with `pcntl_fork()`, as PHP-FPM forks its children: they share the master's OPcache, and
-its memory until they write to it. With 4 workers, Gluo's container goes from 104 to 55 MiB.
+its memory until they write to it. With 4 workers, Gluo's container goes from 109 to 59 MiB.
 
 - Each forked worker connects to a Unix socket the gateway listens on, in `-upload-dir` (PHP must
   see it), and speaks the same protocol there.
@@ -169,7 +191,9 @@ its memory until they write to it. With 4 workers, Gluo's container goes from 10
 Workers start as `php -d disable_functions=<list> worker.php <mode> <entry>`; the gateway gets
 `<list>` once from `php worker.php disable-functions`. With `-prefork`, the master starts as
 `php -d disable_functions=<list> worker.php <mode> <entry> <socket> <workers>`, and each forked
-worker speaks the protocol on its connection to `<socket>` instead of stdin and stdout.
+worker speaks the protocol on its connection to `<socket>` instead of stdin and stdout. With
+`-project-root`, `--project-root=<dir>` comes last, and the worker sets `PROJECT_ROOT` before it
+loads the entry.
 
 A frame is a 4-byte big-endian length followed by JSON. After booting, the worker sends the frame
 `{"ready":true,"pid":<pid>}`. Then, for each request, the gateway sends a frame on stdin, with a new
@@ -189,7 +213,7 @@ The gateway rejects a frame whose length is absurd (any printable byte read as a
 
 | Variable              | Read by                     | Default                         |                                                                    |
 |-----------------------|-----------------------------|---------------------------------|--------------------------------------------------------------------|
-| `PROJECT_ROOT`        | the entries of `compat/`    |                                 | the framework application's folder (see [Existing frameworks](#existing-frameworks)) |
+| `PROJECT_ROOT`        | the entries of `compat/`    |                                 | the framework application's folder, when `-project-root` is not given (see [Existing frameworks](#existing-frameworks)) |
 | `PHPWORKER_PHP`       | `make test`                 | the Makefile's Docker command   | the PHP command of the tests; it must pass stdin through          |
 | `COMPAT_DIR`          | the compatibility tests     | `../gluo-framework-comparison`  | the comparison repository                                          |
 | `COMPAT_ONLY`         | the compatibility tests     |                                 | only the builds whose name contains it                             |

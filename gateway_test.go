@@ -693,3 +693,113 @@ func TestPreforkRequestsGoThroughTheSocket(t *testing.T) {
 		t.Errorf("large body: got %d bytes", len(body))
 	}
 }
+
+func embeddedFolders(t *testing.T, uploadDir string) []string {
+	t.Helper()
+	folders, err := filepath.Glob(filepath.Join(uploadDir, "phpworker-*"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return folders
+}
+
+func TestEmbeddedWorkerAndProjectRoot(t *testing.T) {
+	for name, configure := range map[string]func(*config){"workers": func(*config) {}, "prefork": prefork(1)} {
+		t.Run(name, func(t *testing.T) {
+			srv := startGateway(t, "callable", "testdata/app.php", func(cfg *config) {
+				configure(cfg)
+				cfg.workerScript = ""
+				cfg.projectRoot = "/some/project"
+			})
+
+			_, body := get(t, srv.URL+"/vars")
+			var vars struct {
+				Server map[string]string `json:"server"`
+			}
+			if err := json.Unmarshal([]byte(body), &vars); err != nil {
+				t.Fatalf("%v: %s", err, body)
+			}
+			assertEqual(t, "PROJECT_ROOT", vars.Server["PROJECT_ROOT"], "/some/project")
+		})
+	}
+}
+
+func TestEmbeddedFilesAreRemovedOnClose(t *testing.T) {
+	uploadDir := t.TempDir()
+	g, err := newGateway(config{php: phpCommand(t), mode: "callable", entry: mustAbs(t, "testdata/app.php"), workers: 1,
+		timeout: 10 * time.Second, bootTimeout: 60 * time.Second, maxBody: 1 << 20, uploadDir: uploadDir})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := embeddedFolders(t, uploadDir); len(got) != 1 {
+		t.Fatalf("embedded folders while running: %v", got)
+	}
+	g.Close()
+	if got := embeddedFolders(t, uploadDir); len(got) != 0 {
+		t.Fatalf("embedded folders after Close: %v", got)
+	}
+}
+
+func TestEmbeddedFilesAreRestoredForANewWorker(t *testing.T) {
+	uploadDir := t.TempDir()
+	srv := startGateway(t, "callable", "testdata/app.php", func(cfg *config) {
+		cfg.workerScript = ""
+		cfg.uploadDir = uploadDir
+	})
+	before := getCount(t, srv)
+
+	// A /tmp cleaner took the files while the gateway ran
+	folders := embeddedFolders(t, uploadDir)
+	if len(folders) != 1 {
+		t.Fatalf("embedded folders: %v", folders)
+	}
+	if err := os.RemoveAll(filepath.Join(folders[0], "php")); err != nil {
+		t.Fatal(err)
+	}
+
+	get(t, srv.URL+"/exit")
+	if after := getCount(t, srv); after.Boot == before.Boot {
+		t.Fatalf("the worker was not replaced: %+v", after)
+	}
+}
+
+func TestExtractToWritesTheFilesAndKeepsAFolderInUse(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "new")
+	if err := extractTo(dir); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"php/worker.php", "php/functions.php", "compat/symfony.php", "compat/request-body.php"} {
+		embeddedFile, err := embedded.ReadFile(name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		written, err := os.ReadFile(filepath.Join(dir, name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !bytes.Equal(written, embeddedFile) {
+			t.Fatalf("%s differs from the embedded file", name)
+		}
+	}
+
+	if err := extractTo(dir); err == nil {
+		t.Fatal("extracting over a folder in use must fail")
+	}
+}
+
+func TestEveryFrameworkHasAnEmbeddedEntry(t *testing.T) {
+	for _, name := range frameworks {
+		if _, err := embedded.ReadFile("compat/" + name + ".php"); err != nil {
+			t.Error(err)
+		}
+	}
+}
+
+func mustAbs(t *testing.T, path string) string {
+	t.Helper()
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return abs
+}

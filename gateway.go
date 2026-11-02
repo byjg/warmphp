@@ -22,7 +22,16 @@ type gateway struct {
 	pool *pool
 }
 
-func newGateway(cfg config) (*gateway, error) {
+func newGateway(cfg config) (g *gateway, err error) {
+	if err := cfg.useEmbedded(); err != nil {
+		return nil, err
+	}
+	defer func() {
+		if err != nil {
+			os.RemoveAll(cfg.embeddedDir)
+		}
+	}()
+
 	// worker.php redefines header(), setcookie(), ... which PHP only allows for disabled functions
 	probe := exec.Command(cfg.php[0], append(append([]string{}, cfg.php[1:]...), cfg.workerScript, "disable-functions")...)
 	probe.Stderr = os.Stderr
@@ -41,6 +50,7 @@ func newGateway(cfg config) (*gateway, error) {
 
 func (g *gateway) Close() {
 	g.pool.close()
+	os.RemoveAll(g.cfg.embeddedDir)
 }
 
 func (g *gateway) ServeHTTP(rw http.ResponseWriter, r *http.Request) {

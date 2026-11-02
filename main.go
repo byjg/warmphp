@@ -10,6 +10,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"syscall"
 	"time"
@@ -21,6 +22,8 @@ type config struct {
 	workerScript string
 	mode         string
 	entry        string
+	framework    string
+	projectRoot  string
 	workers      int
 	maxRequests  int
 	prefork      bool
@@ -31,14 +34,19 @@ type config struct {
 
 	// disableFunctions is the disable_functions value workers start with (see worker.php)
 	disableFunctions string
+	// embeddedDir is where the embedded files were written, when they are in use (see embedded.go)
+	embeddedDir string
 }
 
 func main() {
 	var cfg config
-	var php string
+	var php, extractDir string
 	flag.StringVar(&cfg.listen, "listen", ":8080", "address to listen on")
 	flag.StringVar(&php, "php", "php", "command that runs the PHP CLI; may include arguments, e.g. \"docker run --rm -i --init ... php\"")
-	flag.StringVar(&cfg.workerScript, "worker", "php/worker.php", "path to worker.php")
+	flag.StringVar(&cfg.workerScript, "worker", "", "path to a worker.php to use instead of the embedded one")
+	flag.StringVar(&cfg.framework, "framework", "", "run the embedded entry of this framework instead of an entry file: "+strings.Join(frameworks, ", "))
+	flag.StringVar(&cfg.projectRoot, "project-root", "", "the application's folder, given to PHP as PROJECT_ROOT; overrides that variable")
+	flag.StringVar(&extractDir, "extract", "", "write the embedded PHP files to this folder, which must be empty, and exit")
 	flag.StringVar(&cfg.mode, "mode", "callable", "callable: entry runs once and returns the handler; script: entry is included on every request")
 	flag.IntVar(&cfg.workers, "workers", runtime.NumCPU(), "number of PHP worker processes")
 	flag.IntVar(&cfg.maxRequests, "max-requests", 0, "replace a worker after this many requests (0 = never)")
@@ -48,22 +56,41 @@ func main() {
 	flag.Int64Var(&cfg.maxBody, "max-body", 32<<20, "maximum request body size in bytes")
 	flag.StringVar(&cfg.uploadDir, "upload-dir", os.TempDir(), "directory for uploaded files; must be visible to PHP")
 	flag.Usage = func() {
-		fmt.Fprintf(flag.CommandLine.Output(), "usage: %s [flags] entry.php\n", os.Args[0])
+		fmt.Fprintf(flag.CommandLine.Output(), "usage: %[1]s [flags] entry.php\n       %[1]s [flags] -framework name\n", os.Args[0])
 		flag.PrintDefaults()
 	}
 	flag.Parse()
 
-	if flag.NArg() != 1 || (cfg.mode != "callable" && cfg.mode != "script") || cfg.workers < 1 {
+	if extractDir != "" {
+		if err := extractTo(extractDir); err != nil {
+			log.Fatal(err)
+		}
+		return
+	}
+
+	wantedArgs := 1
+	if cfg.framework != "" {
+		wantedArgs = 0
+	}
+	if flag.NArg() != wantedArgs || (cfg.mode != "callable" && cfg.mode != "script") || cfg.workers < 1 ||
+		(cfg.framework != "" && (!slices.Contains(frameworks, cfg.framework) || cfg.mode != "callable")) {
 		flag.Usage()
 		os.Exit(2)
 	}
 	cfg.php = strings.Fields(php)
-	var err error
-	if cfg.entry, err = filepath.Abs(flag.Arg(0)); err != nil {
-		log.Fatal(err)
+	for _, path := range []*string{&cfg.workerScript, &cfg.projectRoot} {
+		if *path != "" {
+			var err error
+			if *path, err = filepath.Abs(*path); err != nil {
+				log.Fatal(err)
+			}
+		}
 	}
-	if cfg.workerScript, err = filepath.Abs(cfg.workerScript); err != nil {
-		log.Fatal(err)
+	if cfg.framework == "" {
+		var err error
+		if cfg.entry, err = filepath.Abs(flag.Arg(0)); err != nil {
+			log.Fatal(err)
+		}
 	}
 
 	g, err := newGateway(cfg)
@@ -83,8 +110,9 @@ func main() {
 		close(stopped)
 	}()
 
-	log.Printf("listening on %s with %d %s workers for %s", cfg.listen, cfg.workers, cfg.mode, cfg.entry)
+	log.Printf("listening on %s with %d %s workers for %s", cfg.listen, cfg.workers, cfg.mode, g.cfg.entry)
 	if err := srv.ListenAndServe(); err != http.ErrServerClosed {
+		g.Close()
 		log.Fatal(err)
 	}
 	<-stopped

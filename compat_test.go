@@ -51,9 +51,6 @@ type framework struct {
 	// maxRequests replaces a worker after this many requests (0 = never)
 	maxRequests int
 	run         func(t *testing.T, fw framework, gw string)
-	// leaks is true for a build known to share state between clients: the leak test then
-	// checks that the leak is still there, as docs/compatibility.md says
-	leaks bool
 
 	loginPath, listPath, newPath, logoutPath        string
 	userField, passwordField, nameField, priceField string
@@ -83,14 +80,13 @@ func startCompatGateway(t *testing.T, fw framework) string {
 			t.Skipf("%s has no %s", root, fw.requires)
 		}
 	}
-	here, _ := filepath.Abs(".")
 	image := os.Getenv("PHPWORKER_IMAGE")
 	if image == "" {
 		image = "byjg/php:8.5-cli-load"
 	}
 
 	php := []string{"docker", "run", "--rm", "-i", "--init", "--network", "host", "-u", fmt.Sprintf("%d:%d", os.Getuid(), os.Getgid()),
-		"-v", root + ":" + root, "-v", here + ":" + here, "-v", "/tmp:/tmp", "-e", "PROJECT_ROOT=" + root}
+		"-v", root + ":" + root, "-v", "/tmp:/tmp"}
 	for _, env := range fw.env {
 		php = append(php, "-e", env)
 	}
@@ -98,15 +94,15 @@ func startCompatGateway(t *testing.T, fw framework) string {
 	php = append(php, image, "php", "-d", "opcache.enable_cli=1")
 
 	g, err := newGateway(config{
-		php:          php,
-		workerScript: filepath.Join(here, "php/worker.php"),
-		mode:         "callable",
-		entry:        filepath.Join(here, "compat", fw.boot),
-		workers:      1,
-		timeout:      60 * time.Second,
-		bootTimeout:  120 * time.Second,
-		maxBody:      1 << 20,
-		uploadDir:    os.TempDir(),
+		php:         php,
+		mode:        "callable",
+		framework:   strings.TrimSuffix(fw.boot, ".php"),
+		projectRoot: root,
+		workers:     1,
+		timeout:     60 * time.Second,
+		bootTimeout: 120 * time.Second,
+		maxBody:     1 << 20,
+		uploadDir:   os.TempDir(),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -440,16 +436,10 @@ func runInertia(t *testing.T, fw framework, gw string) {
 		guestList := anonymous.get(fw.listPath)
 		_, guestLogin := firstVisit(t, newBrowser(t, fw.baseURL, gw), fw.loginPath)
 		auth, _ := guestLogin.Props["auth"].(map[string]any)
-		leaked := guestList.path != fw.loginPath || (auth != nil && auth["user"] != nil)
-		if leaked != fw.leaks {
-			t.Errorf("leak expected %v, got %v: anonymous list answered %d %s, guest login page user %v",
-				fw.leaks, leaked, guestList.status, guestList.path, auth["user"])
+		if guestList.path != fw.loginPath || (auth != nil && auth["user"] != nil) {
+			t.Errorf("leak: anonymous list answered %d %s, guest login page user %v", guestList.status, guestList.path, auth["user"])
 		}
 	})
-	if fw.leaks {
-		measure(t, fw, gw)
-		return // the rest would run as whoever the shared application thinks is logged in
-	}
 
 	admin.inertia(http.MethodPost, fw.listPath, version, map[string]any{"name": name, "price": "12.34"})
 	_, listPage = admin.inertia(http.MethodGet, fw.listPath, version, nil)
@@ -625,7 +615,7 @@ func TestCompat(t *testing.T) {
 			run: runGluoStarter, env: []string{"APP_ENV=test"}, requires: gluoApplication, loginPath: "/login"},
 		{project: "frameworks/fullstack/laravel", boot: "laravel-fresh.php", baseURL: "http://localhost:8081", run: runInertia, env: laravelEnv,
 			loginPath: "/login", listPath: "/products", logoutPath: "/logout"},
-		{project: "frameworks/fullstack/laravel", boot: "laravel-shared.php", baseURL: "http://localhost:8081", run: runInertia, env: laravelEnv, leaks: true,
+		{project: "frameworks/fullstack/laravel", boot: "laravel-shared.php", baseURL: "http://localhost:8081", run: runInertia, env: laravelEnv,
 			loginPath: "/login", listPath: "/products", logoutPath: "/logout"},
 	}
 	for _, fw := range frameworks {

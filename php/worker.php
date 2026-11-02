@@ -3,13 +3,16 @@
 /**
  * Persistent PHP worker for phpworker-gateway. Plain PHP CLI: no SAPI, no FPM, no extension.
  *
- * Usage: php -d disable_functions=<list> worker.php <callable|script> <entry.php> [<socket> <workers>]
+ * Usage: php -d disable_functions=<list> worker.php <callable|script> <entry.php> [<socket> <workers>] [--project-root=<dir>]
  *        php worker.php disable-functions   (prints <list>)
  *
  *   callable  entry.php runs ONCE and returns the request handler (a callable).
  *             Everything it builds (container, routes, connections) stays in memory.
  *   script    entry.php is included again on every request (front-controller style).
  *             Loaded classes and static caches stay in memory, objects do not.
+ *
+ * --project-root sets PROJECT_ROOT, for the entries of compat/: an argument, because the gateway's
+ * environment does not reach a PHP that runs in a container.
  *
  * The gateway sends one request at a time on STDIN: a 4-byte big-endian length followed by
  * a JSON document, then the raw request body (body_size bytes). During the request, STDOUT is
@@ -650,9 +653,12 @@ if ($argc === 2 && $argv[1] === 'disable-functions') {
     exit(0);
 }
 
+$projectRoot = str_starts_with((string)end($argv), '--project-root=') ? substr((string)array_pop($argv), 15) : null;
+$argc = count($argv);
+
 if (!in_array($argc, [3, 5], true) || !in_array($argv[1], ['callable', 'script'], true) || ($entry = realpath($argv[2])) === false
     || ($argc === 5 && (int)$argv[4] < 1)) {
-    fwrite(STDERR, "usage: php -d disable_functions=<list> worker.php <callable|script> <entry.php> [<socket> <workers>]\n");
+    fwrite(STDERR, "usage: php -d disable_functions=<list> worker.php <callable|script> <entry.php> [<socket> <workers>] [--project-root=<dir>]\n");
     exit(2);
 }
 
@@ -662,5 +668,9 @@ if ($enabled !== []) {
     exit(1);
 }
 require __DIR__ . '/functions.php';
+
+if ($projectRoot !== null) {
+    putenv('PROJECT_ROOT=' . $projectRoot);
+}
 
 PhpWorker::run($argv[1], $entry, $argv[3] ?? null, (int)($argv[4] ?? 0));

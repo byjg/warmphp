@@ -23,11 +23,9 @@ byjg/restserver's `Server::withRequestObject()` and `Server::handle()` resetting
 response (see [points 2 and 5](#2-phpinput-is-empty)), and byjg/gluo-core's `Application`, with the
 routes bound as `RouteListInterface::class`. Older Gluo projects are not supported.
 
-The comparison's `gluo/` was created before, and updating it would change its `composer.lock`, so
-its case skips until it is updated. The case `gluo-starter` runs a project created from the
-starter (`COMPAT_GLUO_STARTER`): its sample endpoints, public and behind a JWT, a login, and the
-leak check. The Gluo results below were measured on the comparison's `gluo/`, with the boot file
-that called `Server::withRequestObject()` itself before `Application` existed.
+The case `gluo` runs the comparison's `frameworks/gluo`. The case `gluo-starter` runs a project
+created from the starter (`COMPAT_GLUO_STARTER`): its sample endpoints, public and behind a JWT, a
+login, and the leak check.
 
 CodeIgniter runs in `development`, as the project is configured, with its debug toolbar.
 
@@ -43,7 +41,7 @@ soft delete, logout. Gluo's scenario is the same over its JSON API, with a JWT.
 | Symfony                        | ⚠️ works, but its runtime calls `exit`: a new worker per request  | ✅ full scenario              | ✅ no leak       | prod +1 KB/request, dev +3 KB/request |
 | CakePHP                        | ✅ pages render (not tested further)                              | ✅ full scenario              | ✅ no leak       | flat                         |
 | Laravel, new app per request   | ❌ 500 from the 2nd request                                       | ✅ full scenario              | ✅ no leak       | ❌ +0.5 MB and 1 DB connection per request |
-| Laravel, one shared app        | —                                                                | ⚠️ works, but…                | ❌ **leaks the logged-in user to other clients** | flat |
+| Laravel, one shared app        | —                                                                | ✅ full scenario              | ✅ no leak       | flat                         |
 | CodeIgniter                    | ❌ routed as a CLI command                                        | ✅ full scenario              | ✅ no leak       | flat                         |
 | Gluo                           | ❌ `class App` declared twice; uncaught 404s become 500           | ✅ full scenario              | ✅ no leak       | flat                         |
 
@@ -57,7 +55,7 @@ project's own router, which boots the application on every request like PHP-FPM:
 | Symfony, `dev` (profiler on)             | 78.9 ms           | 49.4 ms |
 | CakePHP, `DEBUG=false`                   | 5.4 ms            | 3.9 ms  |
 | Laravel, new app per request             | 42.8 ms           | 40.3 ms |
-| Laravel, one shared app (leaks)          | 42.8 ms           | 16.9 ms |
+| Laravel, one shared app                  | 42.8 ms           | 16.9 ms |
 | CodeIgniter (development, debug toolbar) | 14.5 ms           | 9.8 ms  |
 | Gluo, `APP_ENV=dev`                      | 7.1 ms            | 2.5 ms  |
 
@@ -158,14 +156,29 @@ Leaks found:
   (CakePHP's host-header protection in production).
 - **CakePHP, bootstrap.** `Server::run()` calls `bootstrap()` every time (`Plugin named DebugKit is
   already loaded`). The boot file runs the middleware itself and bootstraps once.
-- **Laravel, one shared app.** The logged-in admin leaks: right after an admin request, a client
-  without cookies gets the product list, and the guest login page carries the admin user in its
-  props. The leak test asserts this result, so it fails if it ever changes. Do not use it.
+- **Laravel, one shared app.** Laravel's singletons assume one request per process. Kept across
+  requests, three things break, and [`compat/laravel-shared.php`](../compat/laravel-shared.php)
+  resets them before every request, as Octane's listeners do:
+
+  | State kept                                                                                             | What it caused                                                                                                  | Reset (Octane's listener)                                  |
+  |--------------------------------------------------------------------------------------------------------|-----------------------------------------------------------------------------------------------------------------|------------------------------------------------------------|
+  | `Session\Store::$attributes`: `loadSession()` merges what it reads into them                           | A client without cookies gets the previous client's `_token` and login: it sees the product list as the admin   | `FlushSessionState`: `flush()` and `regenerate()`          |
+  | `DatabaseSessionHandler::$exists`, true after the first request                                        | New sessions are updated, not inserted, so never stored. With several workers the token comes from each worker's memory, so a POST on another worker answers 419 | `regenerate()` sets it back to false                       |
+  | The `auth` guards and the `array` cache                                                                | The guard keeps its user; Fortify's limit of 5 logins per minute counts per worker and answers 429 (`CACHE_STORE=array`) | `FlushAuthenticationState`, `FlushArrayCache`              |
+
+  With one worker the 419 never shows, since there is only one token: the benchmark, with 4 workers
+  and 4 clients, is what found it. The API build was never affected: it has a JWT, no session.
+
+  This is a part of what Octane does. It also clones the application per request and isolates the
+  configuration, URLs, locale, Inertia and more: state outside the session, the login and the array
+  cache is still shared. An application that changes it during a request (for example `config()`
+  at runtime, or `App::setLocale()`) needs its own reset, or Octane. On FrankenPHP, Laravel's
+  official path is Octane too (`bin/frankenphp-worker.php` runs `Laravel\Octane\Worker`).
 - **Laravel, new app per request.** Every `Application` stays referenced (the error handlers and the
   `register_shutdown_function()` it registers at each bootstrap), with its database connection:
   +0.5 MB per request, and `SQLSTATE[HY000] [1040] Too many connections` at request 151 (MySQL's
   default `max_connections`). It works only with `-max-requests` below both limits (for example 100),
-  and it is barely faster than booting per request. Laravel needs Octane to run in a worker.
+  and it is barely faster than booting per request: use the shared application instead.
 
 ## Changes made to the worker
 
@@ -188,7 +201,7 @@ These worker behaviours were wrong and are fixed, with tests in `gateway_test.go
 
 ## What is left
 
-- **Laravel** works with a new app per request only with `-max-requests`; a real worker needs Octane's resets.
+- **Laravel** runs in a worker with one application and the resets of `compat/laravel-shared.php`, a part of Octane's; with a new app per request it needs `-max-requests`.
 - An earlier memory test with Laravel, a new app per request, had two requests answered 502
   (`EOF`), right when memory ran out: the worker died before answering. It did not happen again,
   with either protocol, and the worker's own memory test (`/memory-full`) gets its 500.

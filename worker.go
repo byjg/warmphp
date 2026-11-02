@@ -127,6 +127,10 @@ type worker struct {
 }
 
 func startWorker(cfg config) (*worker, error) {
+	command, err := cfg.phpCommand()
+	if err != nil {
+		return nil, err
+	}
 	stdinR, stdinW, err := os.Pipe()
 	if err != nil {
 		return nil, err
@@ -138,8 +142,7 @@ func startWorker(cfg config) (*worker, error) {
 		return nil, err
 	}
 
-	args := append(append([]string{}, cfg.php[1:]...), "-d", "disable_functions="+cfg.disableFunctions, cfg.workerScript, cfg.mode, cfg.entry)
-	cmd := exec.Command(cfg.php[0], args...)
+	cmd := exec.Command(command[0], command[1:]...)
 	// Plain *os.File pipes: Wait() never closes our ends, so the last frame of an
 	// exiting worker (exit() or fatal error) can still be read.
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = stdinR, stdoutW, os.Stderr
