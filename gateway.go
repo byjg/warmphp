@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -35,14 +36,26 @@ func newGateway(cfg config) (g *gateway, err error) {
 		}
 	}()
 
-	// worker.php redefines header(), setcookie(), ... which PHP only allows for disabled functions
-	probe := exec.Command(cfg.php[0], append(append([]string{}, cfg.php[1:]...), cfg.workerScript, "disable-functions")...)
+	// Asked of PHP before any worker starts. worker.php redefines header(), setcookie(), ... which PHP
+	// only allows for disabled functions, and -prefork needs functions a PHP build may not have
+	probe := exec.Command(cfg.php[0], append(append([]string{}, cfg.php[1:]...), cfg.workerScript, "probe")...)
 	probe.Stderr = os.Stderr
 	out, err := probe.Output()
 	if err != nil {
-		return nil, fmt.Errorf("reading disable_functions from the worker: %w", err)
+		return nil, fmt.Errorf("probing PHP: %w", err)
 	}
-	cfg.disableFunctions = strings.TrimSpace(string(out))
+	var found struct {
+		DisableFunctions string   `json:"disable_functions"`
+		PreforkMissing   []string `json:"prefork_missing"`
+	}
+	if err := json.Unmarshal(out, &found); err != nil {
+		return nil, fmt.Errorf("probing PHP: %w in %q", err, out)
+	}
+	if cfg.prefork && len(found.PreforkMissing) > 0 {
+		return nil, fmt.Errorf("-prefork needs PHP's pcntl and posix extensions, and this PHP lacks %s: "+
+			"install them (see Requirements in the README), or run without -prefork", strings.Join(found.PreforkMissing, ", "))
+	}
+	cfg.disableFunctions = found.DisableFunctions
 
 	p, err := newPool(cfg)
 	if err != nil {

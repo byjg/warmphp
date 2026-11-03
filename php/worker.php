@@ -4,7 +4,7 @@
  * Persistent PHP worker for WarmPHP. Plain PHP CLI: no custom SAPI, no FPM, no custom extension.
  *
  * Usage: php -d disable_functions=<list> worker.php <callable|script> <entry.php> [<socket> <workers>] [--project-root=<dir>]
- *        php worker.php disable-functions   (prints <list>)
+ *        php worker.php probe   (prints <list> and what -prefork lacks, as JSON)
  *
  *   callable  entry.php runs ONCE and returns the request handler (a callable).
  *             Everything it builds (container, routes, connections) stays in memory.
@@ -35,6 +35,9 @@ final class PhpWorker
         'header', 'header_remove', 'headers_list', 'http_response_code',
         'setcookie', 'setrawcookie', 'is_uploaded_file', 'move_uploaded_file',
     ];
+
+    /** What the -prefork master calls: the pcntl and posix extensions, not disabled */
+    public const PREFORK_FUNCTIONS = ['pcntl_fork', 'pcntl_waitpid', 'posix_kill'];
 
     private const COOKIE_INVALID_CHARS = ",; \t\r\n\013\014";
 
@@ -274,10 +277,6 @@ final class PhpWorker
      */
     private static function master(callable $handler, string $socket, int $workers): void
     {
-        if (!function_exists('pcntl_fork')) {
-            fwrite(STDERR, "-prefork needs the pcntl extension\n");
-            exit(1);
-        }
         $children = [];
         $fork = static function () use ($handler, $socket, &$children): void {
             $pid = pcntl_fork();
@@ -675,10 +674,14 @@ final class PhpWorker
     }
 }
 
-// The gateway asks for the disable_functions value to start workers with: php.ini's own list plus ours
-if ($argc === 2 && $argv[1] === 'disable-functions') {
+// The gateway asks, before it starts any worker, for the disable_functions value to start them with
+// (php.ini's own list plus ours) and for what -prefork needs that this PHP lacks
+if ($argc === 2 && $argv[1] === 'probe') {
     $current = array_filter(array_map('trim', explode(',', (string)ini_get('disable_functions'))));
-    echo implode(',', array_unique([...$current, ...PhpWorker::OVERRIDDEN]));
+    echo json_encode([
+        'disable_functions' => implode(',', array_unique([...$current, ...PhpWorker::OVERRIDDEN])),
+        'prefork_missing' => array_values(array_filter(PhpWorker::PREFORK_FUNCTIONS, static fn(string $f): bool => !function_exists($f))),
+    ]);
     exit(0);
 }
 

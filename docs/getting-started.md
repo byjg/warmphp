@@ -3,8 +3,62 @@
 WarmPHP keeps your PHP application booted in memory and serves HTTP with it, using the
 plain PHP CLI. You put it behind your usual web server, as you would PHP-FPM.
 
-You need Go to build it, and PHP 8.1 or newer CLI to run it (with `pcntl` for `-prefork`). The binary carries
-its PHP files, so it runs from any folder, on its own.
+You need Go to build it, and a PHP 8.1 or newer CLI to run it, from your distribution or any image.
+The binary carries its PHP files, so it runs from any folder, on its own.
+
+## Install PHP
+
+WarmPHP uses the PHP you already have: nothing is built for it. `-prefork` also needs the `pcntl`
+and `posix` extensions. Without them the gateway refuses `-prefork` when it starts and names what is
+missing, for example:
+
+```
+-prefork needs PHP's pcntl and posix extensions, and this PHP lacks posix_kill: install them (see Requirements in the README), or run without -prefork
+```
+
+The plain workers (no `-prefork`) need neither.
+
+### Ubuntu (apt)
+
+```bash
+sudo apt install php-cli          # pcntl and posix are included
+```
+
+Your application's extensions are packages too: `php-mysql`, `php-mbstring`, `php-xml`...
+Tested on Ubuntu 26.04, PHP 8.5.4.
+
+### Fedora (dnf)
+
+```bash
+sudo dnf install php-cli php-process   # php-process brings posix; pcntl is in php-cli
+```
+
+Without `php-process`, `-prefork` is refused for `posix_kill`. Tested on Fedora 44, PHP 8.5.12.
+
+### Docker's official image
+
+`php:8.5-cli` has `posix` but not `pcntl`. As it is, it runs the plain workers; for `-prefork`, add
+`pcntl` with the image's own tool:
+
+```dockerfile
+FROM php:8.5-cli
+RUN docker-php-ext-install pcntl
+```
+
+Then run PHP through it, as in [PHP in Docker](#7-php-in-docker). Tested with PHP 8.5.12.
+
+### byjg/php images
+
+`byjg/php:8.5-cli` and `byjg/php:8.5-fpm-nginx` have `pcntl` and `posix`. They load Xdebug in
+`develop` mode, which slows every request, so turn it off:
+
+```bash
+./warmphp \
+  -php "docker run --rm -i --init -v $PWD:$PWD -v /tmp:/tmp -u $(id -u):$(id -g) byjg/php:8.5-cli php -d xdebug.mode=off" \
+  examples/hello/app.php
+```
+
+`make test` runs on `byjg/php:8.5-fpm-nginx` by default, and the benchmark uses it. Tested with PHP 8.5.12.
 
 ## 1. Build
 
@@ -163,7 +217,7 @@ cleanly:
 
 ```bash
 ./warmphp \
-  -php "docker run --rm -i --init -v $PWD:$PWD -v /tmp:/tmp -u $(id -u):$(id -g) byjg/php:8.5-cli php" \
+  -php "docker run --rm -i --init -v $PWD:$PWD -v /tmp:/tmp -u $(id -u):$(id -g) php:8.5-cli php" \
   examples/hello/app.php
 ```
 

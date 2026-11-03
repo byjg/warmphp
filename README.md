@@ -22,8 +22,21 @@ Caddy / HAProxy / nginx / static-httpserver
 
 ## Requirements
 
-PHP 8.1 or newer, with `pcntl` for `-prefork`; `php_memory_kb` in the logs needs PHP 8.2. Go only to
+Any PHP 8.1 or newer CLI: a distribution's package or any image, nothing built for WarmPHP. `-prefork`
+also needs the `pcntl` and `posix` extensions; `php_memory_kb` in the logs needs PHP 8.2. Go only to
 build it.
+
+Without `pcntl` or `posix`, the gateway refuses `-prefork` when it starts and names what is missing.
+The gateway's tests pass with:
+
+| PHP | Version | For `-prefork` |
+|-----|---------|----------------|
+| Ubuntu 26.04, `apt install php-cli` | 8.5.4 | nothing more |
+| Fedora 44, `dnf install php-cli` | 8.5.12 | `dnf install php-process` (`posix`) |
+| Docker's official `php:8.5-cli` | 8.5.12 | `docker-php-ext-install pcntl` |
+| `byjg/php:8.5-cli`, `byjg/php:8.5-fpm-nginx` | 8.5.12 | nothing more; turn Xdebug off with `-d xdebug.mode=off` |
+
+How to install each one: [Install PHP](docs/getting-started.md#install-php).
 
 ## Quick start
 
@@ -140,7 +153,7 @@ leaks found.
 
 [docs/benchmark.md](docs/benchmark.md) runs the same journey (log in, page through the products, read
 one, edit it, add one, page again) on each framework, served by nginx with PHP-FPM, by nginx with the
-gateway (with and without `-prefork`) and by FrankenPHP's worker mode, with OPcache on and off.
+gateway (with and without `-prefork`) and by FrankenPHP (classic and worker mode), with OPcache on and off.
 `make benchmark` runs it; it takes hours, and its `BENCH_*` variables select what runs, e.g.
 `make benchmark BENCH_ONLY=gluo BENCH_JOURNEYS=10`.
 
@@ -164,14 +177,14 @@ and the best choice for each framework.
 | `-boot-timeout`  | `30s`            | Maximum time for a worker to boot                                    |
 | `-max-body`      | `32MiB`          | Maximum request body (413 above it)                                  |
 | `-upload-dir`    | system temp dir  | Where uploaded files and the embedded PHP files are written; PHP must see the same path |
-| `-prefork`       | off              | Boot once in a master that forks the workers (see below); needs `pcntl` |
+| `-prefork`       | off              | Boot once in a master that forks the workers (see below); needs `pcntl` and `posix` |
 
 Running PHP in Docker works too. Use `--init`, so PHP is not PID 1 and stops on SIGTERM, and use `-i`
 for stdin:
 
 ```bash
 ./warmphp \
-  -php "docker run --rm -i --init -v $PWD:$PWD -v /tmp:/tmp -u $(id -u):$(id -g) byjg/php:8.5-cli php" \
+  -php "docker run --rm -i --init -v $PWD:$PWD -v /tmp:/tmp -u $(id -u):$(id -g) php:8.5-cli php" \
   examples/hello/app.php
 ```
 
@@ -301,7 +314,7 @@ Replace `debug` with the exporter of your backend.
 Without `-prefork`, every worker is a `php` process of its own: it boots the application, and the
 CLI gives it its own OPcache. With `-prefork`, one master process boots the application and forks
 the workers with `pcntl_fork()`, as PHP-FPM forks its children: they share the master's OPcache, and
-its memory until they write to it. With 4 workers, Gluo's container goes from 109 to 59 MiB.
+its memory until they write to it. With 4 workers, Gluo's container goes from 108 to 59 MiB.
 
 - Each forked worker connects to a Unix socket the gateway listens on, in `-upload-dir` (PHP must
   see it), and speaks the same protocol there.
@@ -315,7 +328,8 @@ its memory until they write to it. With 4 workers, Gluo's container goes from 10
 ## Protocol
 
 Workers start as `php -d disable_functions=<list> worker.php <mode> <entry>`; the gateway gets
-`<list>` once from `php worker.php disable-functions`. With `-prefork`, the master starts as
+`<list>` once from `php worker.php probe`, a JSON object that also names what `-prefork` needs and
+this PHP lacks (`pcntl_fork`, `pcntl_waitpid`, `posix_kill`). With `-prefork`, the master starts as
 `php -d disable_functions=<list> worker.php <mode> <entry> <socket> <workers>`, and each forked
 worker speaks the protocol on its connection to `<socket>` instead of stdin and stdout. With
 `-project-root`, `--project-root=<dir>` comes last, and the worker sets `PROJECT_ROOT` before it

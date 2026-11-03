@@ -2,7 +2,7 @@
 # Runs the benchmark in rounds, one target at a time, with only that target's database up, and
 # keeps each round in benchmark/results-round<n>.tsv. `median.py` then writes results.tsv.
 #   benchmark/rounds.sh <rounds> <test binary, or "go test">     from the repository's root
-# BENCH_* pass through to the benchmark.
+# BENCH_* pass through to the benchmark. It stops at the first target that fails.
 set -u
 rounds=${1:-3}
 bench=${2:-go test}
@@ -21,6 +21,7 @@ api       api-cakephp               api/cakephp                  compose.yaml   
 api       api-codeigniter           api/codeigniter              compose.yaml                                database
 api       api-laravel               api/laravel                  docker-compose.yml                          mysql"
 
+rm -f benchmark/results-round*.tsv
 for round in $(seq 1 "$rounds"); do
     rm -f benchmark/results.tsv
     while read -r -u 3 suite only project files service; do
@@ -33,8 +34,14 @@ for round in $(seq 1 "$rounds"); do
             "${compose[@]}" exec -T "$service" sh -c 'mysql -h127.0.0.1 -uroot -p"$MYSQL_ROOT_PASSWORD" -e "select 1"' >/dev/null 2>&1 && break
             sleep 1
         done
-        BENCH_SUITE=$suite BENCH_ONLY=$only run 2>&1 | grep -E -- '^\s+--- FAIL|^FAIL|journeys failed|docker run:|nothing answers|reseed'
+        output=$(BENCH_SUITE=$suite BENCH_ONLY=$only run 2>&1)
+        status=$?
+        grep -E -- '^\s+--- FAIL|^FAIL|journeys failed|docker run:|nothing answers|reseed' <<< "$output"
         "${compose[@]}" down 2>&1 | tail -1
+        if [ "$status" -ne 0 ]; then
+            echo "== round $round $only failed, stopping" >&2
+            exit "$status"
+        fi
     done 3<<< "$targets"
     mv benchmark/results.tsv "benchmark/results-round$round.tsv"
 done

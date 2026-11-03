@@ -2,7 +2,7 @@
 
 package main
 
-// PHP-FPM, warmphp (with and without -prefork) and FrankenPHP's worker mode on the builds
+// PHP-FPM, warmphp (with and without -prefork) and FrankenPHP (classic and worker mode) on the builds
 // of gluo-framework-comparison: every framework serves the same crud journey (see
 // docs/benchmark.md), with OPcache on and off.
 //
@@ -12,7 +12,7 @@ package main
 // BENCH_JOURNEYS  journeys per run (default 3000); BENCH_CLIENTS  concurrent clients and PHP
 // processes on each server (default 4); BENCH_ONLY  runs the targets whose name contains it;
 // BENCH_SUITE  fullstack or api; BENCH_SERVERS  the servers to run, comma separated (default
-// fpm,worker,prefork,frankenphp); BENCH_PHP_INI  PHP settings for every server, space separated
+// fpm,frankenphp-classic,worker,prefork,frankenphp); BENCH_PHP_INI  PHP settings for every server, space separated
 // (default xdebug.mode=off: the PHP image loads Xdebug); BENCH_IMAGE  the PHP image (default
 // byjg/php:8.5-fpm-nginx); BENCH_GATEWAY  a static gateway binary (default: go build);
 // COMPAT_DIR  the comparison repository (default ../gluo-framework-comparison).
@@ -68,6 +68,31 @@ func randomPrice() float64 { return math.Round((1+rand.Float64()*998)*100) / 100
 
 func randomName() string { return fmt.Sprintf("Bench %d", rand.Int64()) }
 
+func priceText(price float64) string { return strconv.FormatFloat(price, 'f', 2, 64) }
+
+// benchWrites is what the journeys of a run sent to be stored, checked in the database afterwards
+type benchWrites struct {
+	mu     sync.Mutex
+	prices map[int][]string  // the prices sent for each product: clients may edit the same one
+	added  map[string]string // the new products: name, price
+}
+
+func newBenchWrites() *benchWrites {
+	return &benchWrites{prices: map[int][]string{}, added: map[string]string{}}
+}
+
+func (w *benchWrites) edit(id int, price float64) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.prices[id] = append(w.prices[id], priceText(price))
+}
+
+func (w *benchWrites) add(name string, price float64) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.added[name] = priceText(price)
+}
+
 func timed(steps *[]time.Duration, request func() error) error {
 	start := time.Now()
 	err := request()
@@ -120,9 +145,11 @@ func crudFormSteps(b *browser, target benchTarget) [3]func() error {
 	fw := target.framework
 	var edit htmlForm
 	var from string
+	var id int
 	return [3]func() error{
 		func() error {
-			from = fmt.Sprintf(target.editPath, randomProduct())
+			id = randomProduct()
+			from = fmt.Sprintf(target.editPath, id)
 			p, err := b.try(http.MethodGet, from, nil, nil)
 			if err != nil {
 				return err
@@ -135,7 +162,9 @@ func crudFormSteps(b *browser, target benchTarget) [3]func() error {
 			return nil
 		},
 		func() error {
-			p, err := b.trySubmit(edit, map[string]string{fw.priceField: strconv.FormatFloat(randomPrice(), 'f', 2, 64)}, from)
+			price := randomPrice()
+			b.writes.edit(id, price)
+			p, err := b.trySubmit(edit, map[string]string{fw.priceField: priceText(price)}, from)
 			if err == nil && (p.status != http.StatusOK || p.path != cmpOr(target.afterSave, fw.listPath)) {
 				err = fmt.Errorf("edit failed: %d %s", p.status, p.path)
 			}
@@ -150,8 +179,9 @@ func crudFormSteps(b *browser, target benchTarget) [3]func() error {
 			if i < 0 {
 				return fmt.Errorf("no new-product form: %d %s", p.status, p.path)
 			}
-			price := strconv.FormatFloat(randomPrice(), 'f', 2, 64)
-			p, err = b.trySubmit(forms(p.body)[i], map[string]string{fw.nameField: randomName(), fw.priceField: price}, fw.newPath)
+			name, price := randomName(), randomPrice()
+			b.writes.add(name, price)
+			p, err = b.trySubmit(forms(p.body)[i], map[string]string{fw.nameField: name, fw.priceField: priceText(price)}, fw.newPath)
 			if err == nil && (p.status != http.StatusOK || p.path != cmpOr(target.afterSave, fw.listPath)) {
 				err = fmt.Errorf("add failed: %d %s", p.status, p.path)
 			}
@@ -264,11 +294,15 @@ func journeyInertia(b *browser, target benchTarget) ([]time.Duration, error) {
 			return err
 		},
 		func() error {
-			p, _, err := inertia(http.MethodPut, fmt.Sprintf("%s/%d", fw.listPath, id), map[string]any{"name": name, "price": randomPrice()})
+			price := randomPrice()
+			b.writes.edit(id, price)
+			p, _, err := inertia(http.MethodPut, fmt.Sprintf("%s/%d", fw.listPath, id), map[string]any{"name": name, "price": price})
 			return saved(p, err, "edit")
 		},
 		func() error {
-			p, _, err := inertia(http.MethodPost, fw.listPath, map[string]any{"name": randomName(), "price": randomPrice()})
+			name, price := randomName(), randomPrice()
+			b.writes.add(name, price)
+			p, _, err := inertia(http.MethodPost, fw.listPath, map[string]any{"name": name, "price": price})
 			return saved(p, err, "add")
 		},
 	})
@@ -324,11 +358,15 @@ func journeyAPI(b *browser, target benchTarget) ([]time.Duration, error) {
 			return err
 		},
 		func() error {
-			p, _, err := b.tryAPI(http.MethodPut, fmt.Sprintf("%s/%d", fw.listPath, id), token, map[string]any{"name": name, "price": randomPrice()})
+			price := randomPrice()
+			b.writes.edit(id, price)
+			p, _, err := b.tryAPI(http.MethodPut, fmt.Sprintf("%s/%d", fw.listPath, id), token, map[string]any{"name": name, "price": price})
 			return written(p, err, "edit")
 		},
 		func() error {
-			p, _, err := b.tryAPI(http.MethodPost, fw.listPath, token, map[string]any{"name": randomName(), "price": randomPrice()})
+			name, price := randomName(), randomPrice()
+			b.writes.add(name, price)
+			p, _, err := b.tryAPI(http.MethodPost, fw.listPath, token, map[string]any{"name": name, "price": price})
 			return written(p, err, "add")
 		},
 	})
@@ -378,7 +416,7 @@ func mean(values []time.Duration) time.Duration {
 }
 
 // runJourneys runs n journeys with c clients, each journey with a new browser (cookies, connections)
-func runJourneys(t *testing.T, target benchTarget, addr string, n, c int) benchResult {
+func runJourneys(t *testing.T, target benchTarget, addr string, n, c int, writes *benchWrites) benchResult {
 	result := benchResult{journeys: n, steps: make([][]time.Duration, len(benchSteps))}
 	var mu sync.Mutex
 	jobs := make(chan int)
@@ -388,6 +426,7 @@ func runJourneys(t *testing.T, target benchTarget, addr string, n, c int) benchR
 		wg.Go(func() {
 			for range jobs {
 				b := newBrowser(t, target.baseURL, addr)
+				b.writes = writes
 				begin := time.Now()
 				steps, err := target.journey(b, target)
 				total := time.Since(begin)
@@ -618,13 +657,35 @@ var benchFrankenImage = sync.OnceValues(func() (string, error) {
 
 // startFrankenPHP serves the target with FrankenPHP's worker mode: C threads, each running
 // compat/frankenphp.php, which boots the same boot file of compat/ once and handles every request.
-// Its own Caddyfile, as nginx's: no admin API, no HTTPS, no compression, and Caddy's data in dir.
 func startFrankenPHP(t *testing.T, target benchTarget, root, opcache string, c int) string {
+	here, _ := filepath.Abs(".")
+	return benchFranken(t, target, root, opcache, c, fmt.Sprintf(`php_server {
+		worker {
+			file %[1]s
+			num %[2]d
+			match *
+			env WARMPHP_BOOT %[3]s
+			env WARMPHP_MAX_REQUESTS %[4]d
+		}
+	}`, filepath.Join(here, "compat/frankenphp.php"), c, target.boot, target.maxRequests))
+}
+
+// startFrankenClassic serves the target with FrankenPHP's classic mode: C threads running the
+// build's own front controller on every request, as FPM does
+func startFrankenClassic(t *testing.T, target benchTarget, root, opcache string, c int) string {
+	return benchFranken(t, target, root, opcache, c, fmt.Sprintf(`php_server {
+		index %s
+		try_files {path} %s
+	}`, strings.TrimPrefix(target.front, "/"), target.front))
+}
+
+// benchFranken runs FrankenPHP with C threads and the given PHP site directive. Its own Caddyfile,
+// as nginx's: no admin API, no HTTPS, no compression, and Caddy's data in dir.
+func benchFranken(t *testing.T, target benchTarget, root, opcache string, c int, php string) string {
 	image, err := benchFrankenImage()
 	if err != nil {
 		t.Fatal(err)
 	}
-	here, _ := filepath.Abs(".")
 	dir := t.TempDir()
 	var ini []string
 	for _, setting := range append(benchINI(opcache), [2]string{"variables_order", "EGPCS"}) {
@@ -644,18 +705,9 @@ func startFrankenPHP(t *testing.T, target benchTarget, root, opcache string, c i
 http://:%[3]s {
 	bind 127.0.0.1
 	root %[4]s
-	php_server {
-		worker {
-			file %[5]s
-			num %[1]d
-			match *
-			env WARMPHP_BOOT %[6]s
-			env WARMPHP_MAX_REQUESTS %[7]d
-		}
-	}
+	%[5]s
 }
-`, c, strings.Join(ini, "\n"), strings.Split(benchAddr, ":")[1], filepath.Join(root, target.docRoot),
-		filepath.Join(here, "compat/frankenphp.php"), target.boot, target.maxRequests)), 0o644); err != nil {
+`, c, strings.Join(ini, "\n"), strings.Split(benchAddr, ":")[1], filepath.Join(root, target.docRoot), php)), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	name := benchContainer(t, root, target, image, fmt.Sprintf(
@@ -702,9 +754,10 @@ func TestBenchmark(t *testing.T) {
 	laravelEnv := []string{"DB_HOST=127.0.0.1", "DB_PORT=3307", "CACHE_STORE=array"}
 	// The API builds run with the settings of their full-stack siblings (their .env has the database)
 	apiLaravelEnv := []string{"CACHE_STORE=array"}
-	servers := strings.Split(cmpOr(os.Getenv("BENCH_SERVERS"), "fpm,worker,prefork,frankenphp"), ",")
+	servers := strings.Split(cmpOr(os.Getenv("BENCH_SERVERS"), "fpm,frankenphp-classic,worker,prefork,frankenphp"), ",")
 	start := map[string]func(*testing.T, benchTarget, string, string, int) string{
-		"fpm": startFPM, "worker": startWorkers, "prefork": startPrefork, "frankenphp": startFrankenPHP,
+		"fpm": startFPM, "frankenphp-classic": startFrankenClassic, "worker": startWorkers, "prefork": startPrefork,
+		"frankenphp": startFrankenPHP,
 	}
 	for _, server := range servers {
 		if start[server] == nil {
@@ -816,44 +869,61 @@ func TestBenchmark(t *testing.T) {
 				continue
 			}
 		}
+		// In a random order: the first run after the database starts should not always be the same server
+		type benchRun struct{ server, opcache string }
+		var runs []benchRun
 		for _, opcache := range []string{"1", "0"} {
-			label := map[string]string{"1": "on", "0": "off"}[opcache]
 			for _, server := range servers {
-				if server == "fpm" && target.noFPM {
-					continue
+				// The servers that run the build's own front controller: one row for the Laravel variants
+				if (server != "fpm" && server != "frankenphp-classic") || !target.noFPM {
+					runs = append(runs, benchRun{server, opcache})
 				}
-				t.Run(fmt.Sprintf("%s/%s/opcache-%s", target.name, server, label), func(t *testing.T) {
-					reseed(t, target, root)
-					container := start[server](t, target, root, opcache, clients)
-					runJourneys(t, target, benchAddr, max(clients, journeys/20), clients) // warm-up
-					busy, steal, total := benchCPU(t)
-					r := runJourneys(t, target, benchAddr, journeys, clients)
-					busyEnd, stealEnd, totalEnd := benchCPU(t)
-					memory := benchMemory(t, container)
-
-					stepMeans := make([]string, len(benchSteps))
-					for i := range stepMeans {
-						stepMeans[i] = mean(r.steps[i]).Round(10 * time.Microsecond).String()
-					}
-					// FPM has one Laravel row per suite: an application per request
-					name := target.name
-					if server == "fpm" {
-						name = strings.TrimSuffix(name, "-fresh")
-					}
-					fields := []string{cmpOr(target.suite, "both"), name, server, label, strconv.Itoa(r.journeys), strconv.Itoa(r.errors),
-						fmt.Sprintf("%.1f", float64(r.journeys-r.errors)/r.elapsed.Seconds()),
-						percentile(r.totals, 0.50).Round(10 * time.Microsecond).String(),
-						percentile(r.totals, 0.99).Round(10 * time.Microsecond).String(), memory,
-						fmt.Sprintf("%.0f%%", 100*(busyEnd-busy)/(totalEnd-total)),
-						fmt.Sprintf("%.1f%%", 100*(stealEnd-steal)/(totalEnd-total))}
-					line := strings.Join(append(append(fields, stepMeans...), strings.Join(strings.Fields(r.firstError), " ")), "\t")
-					write(line)
-					t.Log(line)
-					if r.errors > 0 {
-						t.Errorf("%d of %d journeys failed, first: %s", r.errors, r.journeys, r.firstError)
-					}
-				})
 			}
+		}
+		rand.Shuffle(len(runs), func(i, j int) { runs[i], runs[j] = runs[j], runs[i] })
+		for _, run := range runs {
+			server, opcache := run.server, run.opcache
+			label := map[string]string{"1": "on", "0": "off"}[opcache]
+			t.Run(fmt.Sprintf("%s/%s/opcache-%s", target.name, server, label), func(t *testing.T) {
+				reseed(t, target, root)
+				container := start[server](t, target, root, opcache, clients)
+				writes := newBenchWrites()
+				runJourneys(t, target, benchAddr, max(clients, journeys/20), clients, writes) // warm-up
+				busy, steal, total := benchCPU(t)
+				r := runJourneys(t, target, benchAddr, journeys, clients, writes)
+				busyEnd, stealEnd, totalEnd := benchCPU(t)
+				memory := benchMemory(t, container)
+				stored := verifyWrites(target, root, writes)
+				if stored != nil {
+					r.firstError = cmpOr(r.firstError, stored.Error())
+				}
+
+				stepMeans := make([]string, len(benchSteps))
+				for i := range stepMeans {
+					stepMeans[i] = mean(r.steps[i]).Round(10 * time.Microsecond).String()
+				}
+				// The servers that run the front controller have one Laravel row per suite: an
+				// application per request
+				name := target.name
+				if server == "fpm" || server == "frankenphp-classic" {
+					name = strings.TrimSuffix(name, "-fresh")
+				}
+				fields := []string{cmpOr(target.suite, "both"), name, server, label, strconv.Itoa(r.journeys), strconv.Itoa(r.errors),
+					fmt.Sprintf("%.3f", float64(r.journeys-r.errors)/r.elapsed.Seconds()),
+					percentile(r.totals, 0.50).Round(10 * time.Microsecond).String(),
+					percentile(r.totals, 0.99).Round(10 * time.Microsecond).String(), memory,
+					fmt.Sprintf("%.0f%%", 100*(busyEnd-busy)/(totalEnd-total)),
+					fmt.Sprintf("%.1f%%", 100*(stealEnd-steal)/(totalEnd-total))}
+				line := strings.Join(append(append(fields, stepMeans...), strings.Join(strings.Fields(r.firstError), " ")), "\t")
+				write(line)
+				t.Log(line)
+				if r.errors > 0 {
+					t.Errorf("%d of %d journeys failed, first: %s", r.errors, r.journeys, r.firstError)
+				}
+				if stored != nil {
+					t.Errorf("journeys failed: %v", stored)
+				}
+			})
 		}
 	}
 }
@@ -869,16 +939,59 @@ func reseed(t *testing.T, target benchTarget, root string) {
 		t.Fatalf("reseed %s: %v %s", target.name, err, out)
 	}
 
-	service, database, table := target.db[0], target.db[1], target.db[2]
+	table := target.db[2]
 	insert := fmt.Sprintf("INSERT INTO %s (name, price, created_at, updated_at) "+
 		"WITH RECURSIVE n(i) AS (SELECT 6 UNION ALL SELECT i + 1 FROM n WHERE i < %d) "+
 		"SELECT CONCAT('Product ', LPAD(i, 3, '0')), 1 + (i * 37) %% 1000 + 0.99, NOW(), NOW() FROM n;\n"+
 		"SELECT COUNT(*), MIN(id), MAX(id) FROM %s WHERE deleted_at IS NULL;\n", table, benchProducts, table)
-	cmd = exec.Command("docker", "compose", "exec", "-T", service, "sh", "-c", `mysql -uroot -p"$MYSQL_ROOT_PASSWORD" -N `+database)
-	cmd.Dir = root
-	cmd.Stdin = strings.NewReader(insert)
-	out, err := cmd.Output()
+	out, err := benchSQL(target, root, insert)
 	if got := strings.Fields(string(out)); err != nil || len(got) != 3 || got[0] != strconv.Itoa(benchProducts) || got[1] != "1" {
 		t.Fatalf("%s: expected %d products, ids from 1 (count, min, max): %q %v", target.name, benchProducts, got, err)
 	}
+}
+
+// benchSQL runs statements through the build's database service
+func benchSQL(target benchTarget, root, statements string) ([]byte, error) {
+	cmd := exec.Command("docker", "compose", "exec", "-T", target.db[0], "sh", "-c", `mysql -uroot -p"$MYSQL_ROOT_PASSWORD" -N `+target.db[1])
+	cmd.Dir = root
+	cmd.Stdin = strings.NewReader(statements)
+	return cmd.Output()
+}
+
+// verifyWrites checks that the database has what the journeys sent: each edited product has one of
+// the prices sent for it, every new product is there with its price, and nothing else appeared
+func verifyWrites(target benchTarget, root string, writes *benchWrites) error {
+	out, err := benchSQL(target, root, fmt.Sprintf("SELECT id, name, price FROM %s WHERE deleted_at IS NULL;\n", target.db[2]))
+	if err != nil {
+		return fmt.Errorf("reading the products: %v", err)
+	}
+	products, added := 0, 0
+	for line := range strings.Lines(string(out)) {
+		columns := strings.Split(strings.TrimSpace(line), "\t")
+		if len(columns) != 3 {
+			return fmt.Errorf("unexpected product row: %q", line)
+		}
+		id, _ := strconv.Atoi(columns[0])
+		price, err := strconv.ParseFloat(columns[2], 64)
+		if err != nil {
+			return fmt.Errorf("product %d: price %q", id, columns[2])
+		}
+		stored := priceText(price)
+		if id > benchProducts {
+			sent, ok := writes.added[columns[1]]
+			if !ok || sent != stored {
+				return fmt.Errorf("product %d %q: stored %s, sent %q", id, columns[1], stored, sent)
+			}
+			added++
+			continue
+		}
+		products++
+		if sent := writes.prices[id]; len(sent) > 0 && !slices.Contains(sent, stored) {
+			return fmt.Errorf("product %d: stored %s, sent %v", id, stored, sent)
+		}
+	}
+	if products != benchProducts || added != len(writes.added) {
+		return fmt.Errorf("%d seeded products and %d new, expected %d and %d", products, added, benchProducts, len(writes.added))
+	}
+	return nil
 }

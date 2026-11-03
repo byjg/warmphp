@@ -122,6 +122,7 @@ type browser struct {
 	base    string
 	http    *http.Client
 	current string // the page the browser is on, sent as Referer
+	writes  *benchWrites
 }
 
 func newBrowser(t *testing.T, base, gateway string) *browser {
