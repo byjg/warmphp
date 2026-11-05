@@ -947,3 +947,49 @@ func TestPreforkRequestGoesToAnotherWorkerWhenItsWorkerEndedIdle(t *testing.T) {
 		t.Errorf("expected a new fork to answer, got %+v (before %+v)", after, before)
 	}
 }
+
+// The RestServer example: each request reaches RestServer as the PSR-7 request that
+// compat/psr7-request.php builds from the worker's globals and body (ServerRequest::fromGlobals)
+func TestRestServerExample(t *testing.T) {
+	if _, err := os.Stat("examples/restserver/vendor/autoload.php"); err != nil {
+		t.Fatal("the example's dependencies are missing: (cd examples/restserver && composer install), or make test")
+	}
+	srv := startGateway(t, "callable", "examples/restserver/app.php", nil)
+
+	// Method, path and query; booted once, so the state is kept between requests
+	var first map[string]any
+	for i := 1; i <= 2; i++ {
+		resp, body := get(t, srv.URL+"/hello?name=joao")
+		assertEqual(t, "GET /hello status", resp.StatusCode, http.StatusOK)
+		hello := decode(t, body)
+		assertEqual(t, "hello", hello["hello"], "joao")
+		assertEqual(t, "requests_served", hello["requests_served"], float64(i))
+		if first == nil {
+			first = hello
+		}
+		assertEqual(t, "pid", hello["pid"], first["pid"])
+		assertEqual(t, "booted_at", hello["booted_at"], first["booted_at"])
+	}
+
+	// The body and the Content-Type header; the status, header and cookie RestServer writes
+	req, err := http.NewRequest(http.MethodPost, srv.URL+"/echo", strings.NewReader(`{"name":"rex","tags":["a","b"]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, body := send(t, req)
+	assertEqual(t, "POST /echo status", resp.StatusCode, http.StatusCreated)
+	assertEqual(t, "X-Echo", resp.Header.Get("X-Echo"), "yes")
+	echoed := ""
+	for _, c := range resp.Cookies() {
+		if c.Name == "echoed" {
+			echoed = c.Value
+		}
+	}
+	assertEqual(t, "echoed cookie", echoed, "yes")
+	assertEqual(t, "received", decode(t, body)["received"], map[string]any{"name": "rex", "tags": []any{"a", "b"}})
+
+	// A method the route does not take is RestServer's answer, through its ErrorHandler
+	resp, _ = get(t, srv.URL+"/echo")
+	assertEqual(t, "GET /echo status", resp.StatusCode, http.StatusMethodNotAllowed)
+}

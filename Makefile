@@ -5,11 +5,13 @@
 #   make benchmark   the crud benchmark on gluo-framework-comparison (long: see docs/benchmark.md)
 #
 # The tests run PHP through WARMPHP_PHP, which must pass stdin through; the image loads Xdebug, so
-# it is turned off, as in the benchmark. The benchmark takes the BENCH_* variables of
+# it is turned off, as in the benchmark. They also run the RestServer example, whose dependencies
+# WARMPHP_COMPOSER installs on the first run. The benchmark takes the BENCH_* variables of
 # docs/benchmark.md, e.g. make benchmark BENCH_ONLY=gluo BENCH_JOURNEYS=10
 
 BINARY := warmphp
 WARMPHP_PHP ?= docker run --rm -i --init -v $(CURDIR):$(CURDIR) -v /tmp:/tmp -u $(shell id -u):$(shell id -g) byjg/php:8.5-fpm-nginx php -d xdebug.mode=off
+WARMPHP_COMPOSER ?= docker run --rm -v $(CURDIR):$(CURDIR) -w $(CURDIR)/examples/restserver -u $(shell id -u):$(shell id -g) -e COMPOSER_HOME=/tmp/composer byjg/php:8.5-fpm-nginx composer
 
 .PHONY: build test benchmark
 
@@ -18,8 +20,12 @@ WARMPHP_PHP ?= docker run --rm -i --init -v $(CURDIR):$(CURDIR) -v /tmp:/tmp -u 
 build:
 	CGO_ENABLED=0 go build -o $(BINARY) .
 
-test:
+test: examples/restserver/vendor
 	WARMPHP_PHP="$(WARMPHP_PHP)" go test -race ./...
 
 benchmark:
 	go test -tags compat -run TestBenchmark -v -timeout 6h ./...
+
+examples/restserver/vendor: examples/restserver/composer.json
+	$(WARMPHP_COMPOSER) install --no-interaction
+	touch $@

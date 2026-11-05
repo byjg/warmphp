@@ -3,6 +3,7 @@
 use ByJG\RestServer\ErrorHandler;
 use ByJG\RestServer\HttpRequest;
 use ByJG\RestServer\HttpResponse;
+use ByJG\RestServer\OutputProcessor\JsonOutputProcessor;
 use ByJG\RestServer\Route\Route;
 use ByJG\RestServer\Route\RouteList;
 use ByJG\RestServer\Server;
@@ -14,21 +15,28 @@ require_once __DIR__ . '/../../compat/psr7-request.php';
 $bootedAt = date('c');
 $requests = 0;
 
-$routes = (new RouteList())
-    ->addRoute(Route::get('/hello')->withClosure(function (HttpResponse $response, HttpRequest $request) use ($bootedAt, &$requests) {
-        $response->write([
-            'hello' => $request->query('name', 'world'),
-            'pid' => getmypid(),
-            'booted_at' => $bootedAt,
-            'requests_served' => ++$requests,
-        ]);
-    }))
-    ->addRoute(Route::post('/echo')->withClosure(function (HttpResponse $response, HttpRequest $request) {
-        $response->setResponseCode(201);
-        $response->addHeader('X-Echo', 'yes');
-        $response->addCookie('echoed', 'yes');
-        $response->write(['received' => json_decode($request->payload(), true)]);
-    }));
+// JSON whatever the client's Accept header asks for (without it, RestServer follows Accept)
+$routes = (new RouteList())->setRoutes([
+    Route::get('/hello')
+        ->withOutputProcessor(JsonOutputProcessor::class)
+        ->withClosure(function (HttpResponse $response, HttpRequest $request) use ($bootedAt, &$requests) {
+            $response->write([
+                'hello' => $request->query('name', 'world'),
+                'pid' => getmypid(),
+                'booted_at' => $bootedAt,
+                'requests_served' => ++$requests,
+            ]);
+        }),
+
+    Route::post('/echo')
+        ->withOutputProcessor(JsonOutputProcessor::class)
+        ->withClosure(function (HttpResponse $response, HttpRequest $request) {
+            $response->setResponseCode(201);
+            $response->addHeader('X-Echo', 'yes');
+            $response->addCookie('echoed', 'yes');
+            $response->write(['received' => json_decode($request->payload(), true)]);
+        }),
+]);
 
 // Every request: php://input is empty in the CLI, so the Server gets a PSR-7 request with
 // the worker's globals and body (Server::withRequestObject(), byjg/restserver 7.0)

@@ -365,6 +365,7 @@ The gateway rejects a frame whose length is absurd (any printable byte read as a
 |-----------------------|-----------------------------|---------------------------------|--------------------------------------------------------------------|
 | `PROJECT_ROOT`        | the entries of `compat/`    |                                 | the framework application's folder, when `-project-root` is not given (see [Existing frameworks](#existing-frameworks)) |
 | `WARMPHP_PHP`       | `make test`                 | the Makefile's Docker command   | the PHP command of the tests; it must pass stdin through          |
+| `WARMPHP_COMPOSER`  | `make test`                 | the Makefile's Docker command   | the Composer command that installs the RestServer example's dependencies |
 | `COMPAT_DIR`          | the compatibility tests     | `../gluo-framework-comparison`  | the comparison repository                                          |
 | `COMPAT_ONLY`         | the compatibility tests     |                                 | only the builds whose name contains it                             |
 | `COMPAT_GLUO_STARTER` | the compatibility tests     |                                 | a project created from the Gluo starter, for the `gluo-starter` case |
@@ -386,3 +387,6 @@ make test
 ```bash
 make test WARMPHP_PHP="php"   # PHP installed on the machine
 ```
+
+The tests also run the [RestServer example](#byjg-restserver): `make test` installs its dependencies
+with `WARMPHP_COMPOSER` the first run, and again when its `composer.json` changes.
