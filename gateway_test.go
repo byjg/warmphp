@@ -35,11 +35,11 @@ func phpCommand(t *testing.T) []string {
 	return command
 }
 
-func startGateway(t *testing.T, mode, entry string, configure func(*config)) *httptest.Server {
+func testConfig(t *testing.T, mode, entry string) config {
 	t.Helper()
 	workerScript, _ := filepath.Abs("php/worker.php")
 	entry, _ = filepath.Abs(entry)
-	cfg := config{
+	return config{
 		php:          phpCommand(t),
 		workerScript: workerScript,
 		mode:         mode,
@@ -50,6 +50,11 @@ func startGateway(t *testing.T, mode, entry string, configure func(*config)) *ht
 		maxBody:      1 << 20,
 		uploadDir:    t.TempDir(),
 	}
+}
+
+func startGateway(t *testing.T, mode, entry string, configure func(*config)) *httptest.Server {
+	t.Helper()
+	cfg := testConfig(t, mode, entry)
 	if configure != nil {
 		configure(&cfg)
 	}
@@ -592,20 +597,9 @@ func prefork(workers int) func(*config) {
 // A PHP without posix, as Fedora's php-cli without php-process: -prefork is refused before
 // anything boots, and the plain workers, which do not need it, still start
 func TestPreforkRefusesAPHPWithoutItsExtensions(t *testing.T) {
-	workerScript, _ := filepath.Abs("php/worker.php")
-	entry, _ := filepath.Abs("testdata/app.php")
-	cfg := config{
-		php:          append(phpCommand(t), "-d", "disable_functions=posix_kill"),
-		workerScript: workerScript,
-		mode:         "callable",
-		entry:        entry,
-		workers:      1,
-		timeout:      10 * time.Second,
-		bootTimeout:  60 * time.Second,
-		maxBody:      1 << 20,
-		uploadDir:    t.TempDir(),
-		prefork:      true,
-	}
+	cfg := testConfig(t, "callable", "testdata/app.php")
+	cfg.php = append(cfg.php, "-d", "disable_functions=posix_kill")
+	cfg.prefork = true
 	_, err := newGateway(cfg)
 	if err == nil || !strings.Contains(err.Error(), "-prefork needs PHP's pcntl and posix extensions, and this PHP lacks posix_kill") {
 		t.Fatalf("expected the gateway to refuse -prefork, got %v", err)
@@ -832,4 +826,124 @@ func mustAbs(t *testing.T, path string) string {
 		t.Fatal(err)
 	}
 	return abs
+}
+
+// The PHP command is checked before anything boots, and each way it can be wrong says what it is
+func TestTheGatewayRefusesAPHPCommandThatDoesNotWork(t *testing.T) {
+	php := phpCommand(t)
+	for _, c := range []struct {
+		name    string
+		command []string
+		want    string
+	}{
+		{"not found", []string{"warmphp-no-such-php"}, `the PHP command "warmphp-no-such-php" could not run: exec: "warmphp-no-such-php": executable file not found`},
+		{"fails", []string{"sh", "-c", "echo no such image >&2; exit 3", "sh"}, "failed (exit status 3): no such image"},
+		{"not PHP", []string{"echo"}, "did not run worker.php: it printed"},
+		// As the docker wrapper that adds -i only when stdin is a terminal: PHP boots and reads nothing
+		{"no stdin", append([]string{"sh", "-c", `exec "$@" </dev/null`, "sh"}, php...), "does not pass its stdin through to PHP"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			cfg := testConfig(t, "callable", "testdata/app.php")
+			cfg.php = c.command
+			g, err := newGateway(cfg)
+			if err == nil {
+				g.Close()
+			}
+			if err == nil || !strings.Contains(err.Error(), c.want) {
+				t.Fatalf("expected an error with %q, got %v", c.want, err)
+			}
+		})
+	}
+}
+
+// Workers that boot and then end on their own, before any request is answered: the gateway gives up
+// instead of replacing them forever. The wrapper passes stdin to the probe only, so the probe passes.
+func TestTheGatewayFailsWhenNoWorkerEverAnswers(t *testing.T) {
+	cfg := testConfig(t, "callable", "testdata/app.php")
+	cfg.php = append([]string{"sh", "-c", `case " $* " in *" probe "*) exec "$@";; esac; exec "$@" </dev/null`, "sh"}, cfg.php...)
+	cfg.workers = 2
+	g, err := newGateway(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := httptest.NewServer(g)
+	defer func() {
+		srv.Close()
+		g.Close()
+	}()
+
+	deadline := time.After(60 * time.Second)
+	for {
+		go func() {
+			if resp, err := http.Get(srv.URL); err == nil {
+				resp.Body.Close()
+			}
+		}()
+		select {
+		case err := <-g.pool.failed:
+			if !strings.Contains(err.Error(), "2 PHP workers ended before answering any request") {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			return
+		case <-time.After(500 * time.Millisecond):
+		case <-deadline:
+			t.Fatal("the gateway kept replacing workers that never answer")
+		}
+	}
+}
+
+// A worker killed past -timeout did not fail on its own: with one worker, it would otherwise be
+// the whole pool lost before any answer
+func TestATimeoutIsNotCountedAsAFailingPHP(t *testing.T) {
+	cfg := testConfig(t, "callable", "testdata/app.php")
+	cfg.timeout = time.Second
+	g, err := newGateway(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := httptest.NewServer(g)
+	defer func() {
+		srv.Close()
+		g.Close()
+	}()
+
+	resp, _ := get(t, srv.URL+"/sleep")
+	assertEqual(t, "status", resp.StatusCode, http.StatusGatewayTimeout)
+	getCount(t, srv)
+	select {
+	case err := <-g.pool.failed:
+		t.Fatalf("a timeout made the gateway give up: %v", err)
+	default:
+	}
+}
+
+// PHP gives a socket default_socket_timeout to wait for data: a forked worker waits for its next
+// request on one, and it must not end when it is idle that long
+func TestPreforkWorkersStayWhenIdle(t *testing.T) {
+	srv := startGateway(t, "callable", "testdata/app.php", func(cfg *config) {
+		prefork(1)(cfg)
+		cfg.php = append(cfg.php, "-d", "default_socket_timeout=1")
+	})
+	before := getCount(t, srv)
+	time.Sleep(2500 * time.Millisecond)
+	after := getCount(t, srv)
+	if after.Pid != before.Pid || after.Count != before.Count+1 {
+		t.Errorf("expected the same worker after being idle, got %+v (before %+v)", after, before)
+	}
+}
+
+// A forked worker that ended while idle is only seen to end when the gateway writes to it. PHP
+// never got the request, so another worker answers it, not a 502.
+func TestPreforkRequestGoesToAnotherWorkerWhenItsWorkerEndedIdle(t *testing.T) {
+	srv := startGateway(t, "callable", "testdata/app.php", prefork(1))
+	before := getCount(t, srv)
+	resp, body := get(t, srv.URL+"/die-idle")
+	assertEqual(t, "die-idle", body, "ok")
+	assertEqual(t, "die-idle status", resp.StatusCode, http.StatusOK)
+	time.Sleep(2 * time.Second)
+
+	after := getCount(t, srv)
+	if after.Pid == before.Pid || after.Count != 1 {
+		t.Errorf("expected a new fork to answer, got %+v (before %+v)", after, before)
+	}
 }

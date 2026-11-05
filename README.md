@@ -317,7 +317,10 @@ the workers with `pcntl_fork()`, as PHP-FPM forks its children: they share the m
 its memory until they write to it. With 4 workers, Gluo's container goes from 108 to 59 MiB.
 
 - Each forked worker connects to a Unix socket the gateway listens on, in `-upload-dir` (PHP must
-  see it), and speaks the same protocol there.
+  see it), and speaks the same protocol there. It waits on it for its next request with no time
+  limit, whatever `default_socket_timeout` says; the application's own sockets keep that setting.
+- A forked worker that ended while idle is only seen to end when the gateway writes the next request
+  to it: PHP never got that request, so another worker answers it.
 - The master replaces a worker that exits (`exit()`, a fatal error, `-max-requests`) with a new fork
   of the booted application, so a replacement needs no boot. A worker past `-timeout` is killed by
   the master, which the gateway asks on the master's stdin.
@@ -329,7 +332,11 @@ its memory until they write to it. With 4 workers, Gluo's container goes from 10
 
 Workers start as `php -d disable_functions=<list> worker.php <mode> <entry>`; the gateway gets
 `<list>` once from `php worker.php probe`, a JSON object that also names what `-prefork` needs and
-this PHP lacks (`pcntl_fork`, `pcntl_waitpid`, `posix_kill`). With `-prefork`, the master starts as
+this PHP lacks (`pcntl_fork`, `pcntl_waitpid`, `posix_kill`), and echoes a line the gateway wrote
+on its stdin. The gateway stops there when the command cannot run, fails, does not run
+`worker.php`, or does not pass stdin through to PHP, saying which. Later, if as many workers as
+`-workers` end before any request was answered, it stops too, instead of replacing them forever.
+With `-prefork`, the master starts as
 `php -d disable_functions=<list> worker.php <mode> <entry> <socket> <workers>`, and each forked
 worker speaks the protocol on its connection to `<socket>` instead of stdin and stdout. With
 `-project-root`, `--project-root=<dir>` comes last, and the worker sets `PROJECT_ROOT` before it

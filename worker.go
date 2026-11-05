@@ -135,8 +135,10 @@ type worker struct {
 	exited chan struct{} // nil for a forked worker: its errors show up on the connection
 	kill   func()        // forked worker: asks the master to kill it
 	served int
-	pid    int // as PHP sees it: with -php "docker run ...", cmd is the docker client
-	log    *phpLog
+	// timedOut: the gateway stopped it past -timeout; it did not fail on its own
+	timedOut bool
+	pid      int // as PHP sees it: with -php "docker run ...", cmd is the docker client
+	log      *phpLog
 }
 
 func startWorker(cfg config) (*worker, error) {
@@ -216,6 +218,10 @@ func startWorker(cfg config) (*worker, error) {
 	return w, nil
 }
 
+// errNotSent: the request could not be written to the worker, which has ended. As the worker only
+// runs a request once it has read all of it, PHP did not run it.
+var errNotSent = errors.New("the worker did not take the request")
+
 func (w *worker) roundTrip(ctx context.Context, req *phpRequest) (*phpResponse, error) {
 	type result struct {
 		resp *phpResponse
@@ -228,7 +234,7 @@ func (w *worker) roundTrip(ctx context.Context, req *phpRequest) (*phpResponse, 
 		req.Boundary = "--warmphp-" + hex.EncodeToString(boundary)
 		req.BodySize = len(req.Body)
 		if err := writeFrame(w.in, req, req.Body); err != nil {
-			done <- result{err: err}
+			done <- result{err: fmt.Errorf("%w: %w", errNotSent, err)}
 			return
 		}
 		resp, err := readResponse(w.reader, []byte(req.Boundary))
@@ -285,10 +291,15 @@ type pool struct {
 	closing atomic.Bool
 	pending sync.WaitGroup // workers being replaced
 	master  *master        // -prefork: it forks the workers and replaces them
+	// Until a worker answers a request, workers that end without answering are counted: as many as
+	// the pool holds, and PHP does not work with this command and entry. failed says so.
+	answered atomic.Bool
+	lost     atomic.Int32
+	failed   chan error
 }
 
 func newPool(cfg config) (*pool, error) {
-	p := &pool{cfg: cfg, idle: make(chan *worker, cfg.workers)}
+	p := &pool{cfg: cfg, idle: make(chan *worker, cfg.workers), failed: make(chan error, 1)}
 	if cfg.prefork {
 		return p, p.startMaster()
 	}
@@ -330,6 +341,12 @@ func (p *pool) acquire(ctx context.Context) (*worker, error) {
 // release returns w to the pool, or replaces it when it is unhealthy
 // or has served cfg.maxRequests requests.
 func (p *pool) release(w *worker, healthy bool) {
+	if w.served > 0 {
+		p.answered.Store(true)
+	} else if !healthy && !w.timedOut && !p.answered.Load() && !p.closing.Load() && int(p.lost.Add(1)) == p.cfg.workers {
+		p.failed <- fmt.Errorf("%d PHP workers ended before answering any request, and none has answered one "+
+			"since the gateway started: PHP does not work with this command and entry (its errors are logged above)", p.cfg.workers)
+	}
 	recycle := p.cfg.maxRequests > 0 && w.served >= p.cfg.maxRequests
 	if healthy && !recycle && !p.closing.Load() {
 		p.idle <- w

@@ -102,6 +102,7 @@ func main() {
 	if err != nil {
 		fatal(err)
 	}
+	go func() { fatal(<-g.pool.failed) }()
 
 	srv := &http.Server{Addr: cfg.listen, Handler: g}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)

@@ -332,7 +332,12 @@ final class PhpWorker
         // The master's random state was copied into every child: mt_rand() would repeat itself
         mt_srand();
         fclose(STDIN);
+        // PHP gives a socket default_socket_timeout (60 s) to wait for data, and a worker idle that
+        // long would end. Its connection waits for the gateway with no limit; the application's own
+        // sockets keep the setting.
+        $timeout = (string)ini_set('default_socket_timeout', '-1');
         $connection = @stream_socket_client('unix://' . $socket, $code, $message, 5);
+        ini_set('default_socket_timeout', $timeout);
         if ($connection === false) {
             fwrite(STDERR, "connecting to $socket: $message\n");
             exit(1);
@@ -675,12 +680,14 @@ final class PhpWorker
 }
 
 // The gateway asks, before it starts any worker, for the disable_functions value to start them with
-// (php.ini's own list plus ours) and for what -prefork needs that this PHP lacks
+// (php.ini's own list plus ours), for what -prefork needs that this PHP lacks, and for the line it
+// wrote on STDIN, which shows that the requests will reach PHP
 if ($argc === 2 && $argv[1] === 'probe') {
     $current = array_filter(array_map('trim', explode(',', (string)ini_get('disable_functions'))));
     echo json_encode([
         'disable_functions' => implode(',', array_unique([...$current, ...PhpWorker::OVERRIDDEN])),
         'prefork_missing' => array_values(array_filter(PhpWorker::PREFORK_FUNCTIONS, static fn(string $f): bool => !function_exists($f))),
+        'stdin' => trim((string)fgets(STDIN)),
     ]);
     exit(0);
 }

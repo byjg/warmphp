@@ -191,6 +191,12 @@ return static function () use ($boot, &$count): void {
             sleep(5);
             break;
 
+        case '/die-idle':
+            // SIGALRM's default action ends the process: in a second, while it waits for a request
+            pcntl_alarm(1);
+            echo 'ok';
+            break;
+
         default:
             http_response_code(404);
     }

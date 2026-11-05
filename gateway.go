@@ -36,20 +36,9 @@ func newGateway(cfg config) (g *gateway, err error) {
 		}
 	}()
 
-	// Asked of PHP before any worker starts. worker.php redefines header(), setcookie(), ... which PHP
-	// only allows for disabled functions, and -prefork needs functions a PHP build may not have
-	probe := exec.Command(cfg.php[0], append(append([]string{}, cfg.php[1:]...), cfg.workerScript, "probe")...)
-	probe.Stderr = os.Stderr
-	out, err := probe.Output()
+	found, err := probePHP(cfg)
 	if err != nil {
-		return nil, fmt.Errorf("probing PHP: %w", err)
-	}
-	var found struct {
-		DisableFunctions string   `json:"disable_functions"`
-		PreforkMissing   []string `json:"prefork_missing"`
-	}
-	if err := json.Unmarshal(out, &found); err != nil {
-		return nil, fmt.Errorf("probing PHP: %w in %q", err, out)
+		return nil, err
 	}
 	if cfg.prefork && len(found.PreforkMissing) > 0 {
 		return nil, fmt.Errorf("-prefork needs PHP's pcntl and posix extensions, and this PHP lacks %s: "+
@@ -62,6 +51,43 @@ func newGateway(cfg config) (g *gateway, err error) {
 		return nil, err
 	}
 	return &gateway{cfg: cfg, pool: p}, nil
+}
+
+type probed struct {
+	DisableFunctions string   `json:"disable_functions"`
+	PreforkMissing   []string `json:"prefork_missing"`
+	Stdin            string   `json:"stdin"`
+}
+
+// probePHP runs the PHP command once before any worker starts. worker.php redefines header(),
+// setcookie(), ... which PHP only allows for disabled functions, -prefork needs functions a PHP
+// build may not have, and every request goes to PHP on its stdin: the probe reads a line there.
+func probePHP(cfg config) (probed, error) {
+	var found probed
+	command := strings.Join(cfg.php, " ")
+	token := make([]byte, 8)
+	_, _ = rand.Read(token)
+	sent := hex.EncodeToString(token)
+
+	probe := exec.Command(cfg.php[0], append(append([]string{}, cfg.php[1:]...), cfg.workerScript, "probe")...)
+	probe.Stdin = strings.NewReader(sent + "\n")
+	var stderr strings.Builder
+	probe.Stderr = &stderr
+	out, err := probe.Output()
+	if _, ok := errors.AsType[*exec.ExitError](err); ok {
+		return found, fmt.Errorf("the PHP command %q failed (%w): %s", command, err, strings.TrimSpace(stderr.String()))
+	}
+	if err != nil {
+		return found, fmt.Errorf("the PHP command %q could not run: %w", command, err)
+	}
+	if err := json.Unmarshal(out, &found); err != nil {
+		return found, fmt.Errorf("the PHP command %q did not run worker.php: it printed %q", command, out)
+	}
+	if found.Stdin != sent {
+		return found, fmt.Errorf("the PHP command %q does not pass its stdin through to PHP, and the gateway sends every "+
+			"request on it: a wrapper script or container must keep stdin open (docker run -i)", command)
+	}
+	return found, nil
 }
 
 func (g *gateway) Close() {
@@ -141,21 +167,29 @@ func (g *gateway) handle(rw http.ResponseWriter, r *http.Request, requestID stri
 	defer cancel()
 
 	queued := time.Now()
-	w, err := g.pool.acquire(ctx)
-	done := outcome{queue: time.Since(queued)}
-	if err != nil {
-		http.Error(rw, "no PHP worker available", http.StatusServiceUnavailable)
-		done.status = http.StatusServiceUnavailable
-		return done
-	}
-	done.pid = w.pid
-
-	resp, err := w.roundTrip(ctx, req)
-	if err != nil {
+	var w *worker
+	var resp *phpResponse
+	for {
+		if w, err = g.pool.acquire(ctx); err != nil {
+			http.Error(rw, "no PHP worker available", http.StatusServiceUnavailable)
+			return outcome{status: http.StatusServiceUnavailable, queue: time.Since(queued)}
+		}
+		resp, err = w.roundTrip(ctx, req)
+		if !errors.Is(err, errNotSent) {
+			break
+		}
+		// The worker had ended while idle (a forked one is only seen to end here): PHP never got
+		// the request, so another worker takes it
 		w.log.finish(requestID)
 		g.pool.release(w, false)
+	}
+	done := outcome{queue: time.Since(queued), pid: w.pid}
+	if err != nil {
+		w.log.finish(requestID)
+		w.timedOut = errors.Is(err, context.DeadlineExceeded)
+		g.pool.release(w, false)
 		fields := []any{"request_id", requestID, "path", r.URL.Path, "worker_pid", w.pid}
-		if errors.Is(err, context.DeadlineExceeded) {
+		if w.timedOut {
 			slog.Error("request timed out", append(fields, "timeout", g.cfg.timeout.String())...)
 			http.Error(rw, "PHP worker timed out", http.StatusGatewayTimeout)
 			done.status = http.StatusGatewayTimeout

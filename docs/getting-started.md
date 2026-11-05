@@ -226,6 +226,14 @@ writes its PHP files there when it starts. Without that, PHP stops with "Could n
 Environment variables do not reach the container unless you pass them with `-e`; `-project-root`
 does, as it is an argument.
 
+The gateway checks the command before it starts any worker, and stops with what is wrong: not
+found, failed (with PHP's or Docker's error), or not passing stdin, as a wrapper script that adds
+`-i` only when stdin is a terminal:
+
+```
+the PHP command "php" does not pass its stdin through to PHP, and the gateway sends every request on it: a wrapper script or container must keep stdin open (docker run -i)
+```
+
 ## What to watch for
 
 The application stays in memory between requests, so:
