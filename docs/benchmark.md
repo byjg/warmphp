@@ -7,7 +7,7 @@ The same user journey, run on the builds of
 - **frankenphp-classic**: FrankenPHP without its worker mode: like FPM, it runs the project's front
   controller on every request, without nginx.
 - **worker**: nginx and WarmPHP, one booted PHP process per worker.
-- **prefork**: the same with `-prefork`: one boot, forked into the workers.
+- **prefork**: the same with `-mode prefork`: one boot, forked into the workers.
 - **frankenphp**: FrankenPHP's worker mode, without nginx.
 
 There are two suites:
@@ -105,7 +105,7 @@ user, mounts and environment, **nginx in front** on `127.0.0.1:18811`, and **4 P
 - **worker**: the gateway (built static, `CGO_ENABLED=0`) on `127.0.0.1:18812`, with `-workers 4`
   and the boot file of `compat/`; its workers are the image's `php`, as its child processes (the
   frames go through plain pipes). nginx proxies to it over HTTP/1.1 with keep-alive.
-- **prefork**: the same with `-prefork`; the workers are forks of one booted master, and talk to
+- **prefork**: the same with `-mode prefork`; the workers are forks of one booted master, and talk to
   the gateway over a Unix socket.
 
 The nginx configuration is the same for the three except that `location`: the image's defaults
@@ -135,7 +135,7 @@ the same CPU test, one process:
 | byjg (Alpine, NTS)        |        170.5 ms |       194 ms | 394 ms |
 | FrankenPHP (Debian, ZTS)  |        161.0 ms |       209 ms | 379 ms |
 
-So FrankenPHP's login is faster whatever the server does, in both its modes: about 3 % against
+So FrankenPHP's login is faster whatever the server does, in both its modes: 2 to 4 % against
 FPM's in this benchmark (frankenphp-classic against fpm, which do the same work).
 
 The **memory** column is what `docker stats` shows for that container after the run (without the
@@ -179,19 +179,21 @@ took 1.1 to 1.9 % longer, within the difference between rounds.
 100 journeys per run, one build at a time, with only that build's database up: 102 runs, 3 rounds
 each, 30,600 journeys, **none failed the checks**. Each row is the round with the median journeys/s; the
 `spread` column of [`benchmark/results.tsv`](../benchmark/results.tsv) is the difference between the rounds:
-at most 12 %, and 2 % at the median, so treat a difference under about 5 % as too close to call; three short rounds are not a significance test. Each round is also in `benchmark/results-round<n>.tsv`.
-Intel Core Ultra 9 185H (22 CPUs), 30 GB, Docker. MySQL 8.4 for the full-stack builds, 8.0 for the
-API builds. A journey's login is bcrypt, about half of it or more, so
+at most 11 %, and 1 % at the median, so treat a difference under about 5 % as too close to call; three short rounds are not a significance test. Each round is also in `benchmark/results-round<n>.tsv`.
+Intel Core Ultra 9 185H (22 CPUs), 30 GB, Docker, every build on MySQL 8.4. All Docker containers
+were removed before the first round, and the machine-wide `cpu` column reads 16 to 19 % in every
+run. A journey's login is bcrypt, about half of it or more, so
 the "7 steps" tables below show the frameworks and the servers better.
 
-**A few rows vary more than the rest.** Most rows differ by 3 % or less between rounds. The
-exceptions are full-stack CodeIgniter, up to 12 % (worker and FrankenPHP, OPcache on and off), the
-Laravel API with a new application per request on the plain worker without OPcache, 11 %, and the
-Symfony API on prefork without OPcache, 8 %. Each of those is one round of one run, not a whole round:
-full-stack CodeIgniter on the plain worker, for example, read 9.7, 9.6 and 8.6 journeys/s.
-The full-stack login is also slower, about 213 ms on full-stack CakePHP against 198 on its API, and
-the machine-wide `cpu` column reads about 23 % against 19 %. That is so in all 3 rounds and on every
-server, so it does not change the comparison inside a build; its cause was not measured.
+**A few rows vary more than the rest.** 92 of the 102 rows differ by 3 % or less between rounds. The
+exceptions are full-stack CakePHP on prefork with OPcache, 11 % (14.6, 13.7 and 15.2 journeys/s),
+the Symfony API on prefork with OPcache, 8 %, and the CakePHP API on classic FrankenPHP and the
+Laravel API (shared application) on prefork, 7 %. Each of those is one run, not a whole round:
+the other runs of the same rounds are steady. The step that moves is `edit`, the first write (full-stack
+CakePHP on prefork took 26, 50 and 17 ms for it; the Symfony API on prefork, 12, 12 and 42), and the
+same step varies inside rows whose journeys/s do not: the Symfony API on FrankenPHP with
+OPcache took 11, 23 and 26 ms for it in the three rounds, so its 43 ms for the 7 steps, against
+35 on prefork and 31 on FrankenPHP without OPcache, is that step, not the server.
 
 ### Journeys per second (higher is better)
 
@@ -199,22 +201,22 @@ server, so it does not change the comparison inside a build; its cause was not m
 
 | Build               | OPcache on: fpm | frankenphp-classic | worker | prefork | frankenphp | OPcache off: fpm | frankenphp-classic | worker | prefork | frankenphp |
 |---------------------|----------------:|-------------------:|-------:|--------:|-----------:|-----------------:|-------------------:|-------:|--------:|-----------:|
-| Gluo                |            15.3 |               15.6 |   16.5 |    16.7 |       17.6 |              9.3 |                9.4 |   16.6 |    16.9 |       17.7 |
-| Symfony             |             8.3 |                8.5 |    9.1 |     9.1 |        9.6 |              4.0 |                4.1 |    9.1 |     9.0 |        9.5 |
-| CakePHP             |            15.8 |               16.3 |   16.8 |    17.2 |       18.0 |              6.8 |                7.0 |   17.1 |    17.0 |       17.9 |
-| CodeIgniter         |            14.5 |               14.4 |   15.0 |    15.1 |       15.3 |              7.2 |                7.2 |   14.9 |    14.9 |       15.2 |
-| Laravel, new app    |            12.2 |               12.5 |    9.7 |    11.8 |       12.9 |              3.7 |                3.8 |   10.3 |    10.3 |       11.2 |
-| Laravel, shared app |            12.2 |               12.5 |   14.5 |    14.5 |       15.3 |              3.7 |                3.8 |   14.4 |    14.4 |       15.2 |
+| Gluo                |            16.8 |               17.3 |   18.2 |    18.1 |       19.5 |             10.5 |               10.7 |   18.1 |    18.1 |       19.4 |
+| Symfony             |             9.3 |                9.4 |   10.1 |    10.1 |       10.4 |              4.6 |                4.6 |   10.1 |    10.1 |       10.7 |
+| CakePHP             |            17.1 |               17.8 |   18.5 |    18.5 |       19.7 |              7.7 |                7.8 |   18.4 |    18.4 |       19.7 |
+| CodeIgniter         |            15.7 |               15.8 |   16.2 |    16.3 |       16.8 |              8.1 |                8.1 |   16.1 |    16.1 |       16.6 |
+| Laravel, new app    |            13.2 |               13.6 |   10.6 |    12.9 |       14.2 |              4.3 |                4.3 |   11.3 |    11.1 |       12.4 |
+| Laravel, shared app |            13.2 |               13.6 |   15.6 |    15.7 |       16.7 |              4.3 |                4.3 |   15.7 |    15.6 |       16.5 |
 
 **fullstack** (Gluo is the API above)
 
 | Build               | OPcache on: fpm | frankenphp-classic | worker | prefork | frankenphp | OPcache off: fpm | frankenphp-classic | worker | prefork | frankenphp |
 |---------------------|----------------:|-------------------:|-------:|--------:|-----------:|-----------------:|-------------------:|-------:|--------:|-----------:|
-| Symfony             |             7.1 |                7.3 |    8.2 |     8.1 |        8.7 |              2.6 |                2.7 |    8.2 |     8.2 |        8.7 |
-| CakePHP             |            12.4 |               12.6 |   13.5 |    13.7 |       14.5 |              4.5 |                4.4 |   13.1 |    12.9 |       14.1 |
-| CodeIgniter         |             8.8 |                8.2 |    9.6 |    10.1 |       10.0 |              4.1 |                4.2 |    9.5 |     9.4 |        9.4 |
-| Laravel, new app    |             5.1 |                5.1 |    4.3 |     4.9 |        5.3 |              2.0 |                2.0 |    4.4 |     4.4 |        4.7 |
-| Laravel, shared app |             5.1 |                5.1 |    5.5 |     5.6 |        5.8 |              2.0 |                2.0 |    5.6 |     5.6 |        5.7 |
+| Symfony             |             8.1 |                8.2 |    9.2 |     9.2 |        9.8 |              3.1 |                3.1 |    9.1 |     9.1 |        9.7 |
+| CakePHP             |            13.9 |               14.2 |   15.0 |    14.6 |       16.4 |              5.3 |                5.1 |   14.8 |    14.8 |       16.1 |
+| CodeIgniter         |             9.9 |                9.9 |   11.0 |    11.3 |       11.3 |              4.7 |                4.7 |   10.7 |    10.7 |       10.9 |
+| Laravel, new app    |             5.6 |                5.6 |    4.7 |     5.4 |        5.8 |              2.3 |                2.3 |    4.9 |     4.9 |        5.2 |
+| Laravel, shared app |             5.6 |                5.6 |    6.1 |     6.1 |        6.3 |              2.3 |                2.3 |    6.0 |     6.0 |        6.2 |
 
 ### The 7 steps after the login, ms (lower is better)
 
@@ -225,17 +227,17 @@ suite.
 
 | Build                       | OPcache on: fpm | frankenphp-classic | worker | prefork | frankenphp | OPcache off: fpm | frankenphp-classic | worker | prefork | frankenphp |
 |-----------------------------|----------------:|-------------------:|-------:|--------:|-----------:|-----------------:|-------------------:|-------:|--------:|-----------:|
-| Gluo                        |              49 |                 50 |     28 |      27 |         24 |              188 |                189 |     28 |      28 |         25 |
-| Symfony API                 |              71 |                 74 |     37 |      35 |         31 |              509 |                509 |     36 |      36 |         33 |
-| CakePHP API                 |              54 |                 53 |     36 |      35 |         30 |              341 |                339 |     36 |      34 |         32 |
-| CodeIgniter API             |              74 |                 81 |     62 |      60 |         63 |              316 |                319 |     64 |      64 |         63 |
-| Laravel API, new app        |              94 |                 95 |    166 |     104 |         88 |              723 |                722 |    146 |     147 |        126 |
-| Laravel API, shared         |              94 |                 95 |     51 |      49 |         44 |              723 |                722 |     51 |      52 |         45 |
-| Symfony full-stack          |             129 |                126 |     68 |      67 |         62 |              867 |                862 |     75 |      68 |         64 |
-| CakePHP full-stack          |             107 |                106 |     83 |      80 |         74 |              538 |                558 |     86 |      94 |         74 |
-| CodeIgniter full-stack      |             193 |                217 |    161 |     152 |        160 |              591 |                585 |    165 |     170 |        178 |
-| Laravel full-stack, new app |             305 |                310 |    418 |     322 |        293 |             1202 |               1195 |    391 |     391 |        357 |
-| Laravel full-stack, shared  |             305 |                310 |    250 |     247 |        239 |             1202 |               1195 |    252 |     252 |        247 |
+| Gluo                        |              42 |                 43 |     27 |      26 |         23 |              164 |                163 |     26 |      27 |         24 |
+| Symfony API                 |              65 |                 71 |     35 |      35 |         43 |              449 |                449 |     35 |      35 |         31 |
+| CakePHP API                 |              53 |                 52 |     36 |      37 |         32 |              301 |                301 |     37 |      38 |         33 |
+| CodeIgniter API             |              70 |                 75 |     63 |      61 |         62 |              277 |                282 |     62 |      64 |         64 |
+| Laravel API, new app        |              87 |                 87 |    137 |      94 |         78 |              641 |                634 |    130 |     135 |        110 |
+| Laravel API, shared         |              87 |                 87 |     47 |      46 |         42 |              641 |                634 |     46 |      47 |         44 |
+| Symfony full-stack          |             108 |                118 |     65 |      65 |         57 |              743 |                750 |     67 |      67 |         60 |
+| CakePHP full-stack          |              96 |                 98 |     77 |      86 |         66 |              467 |                474 |     79 |      79 |         71 |
+| CodeIgniter full-stack      |             175 |                180 |    141 |     136 |        140 |              511 |                524 |    147 |     150 |        150 |
+| Laravel full-stack, new app |             270 |                279 |    360 |     294 |        259 |             1040 |               1037 |    352 |     356 |        319 |
+| Laravel full-stack, shared  |             270 |                279 |    226 |     220 |        217 |             1040 |               1037 |    230 |     230 |        228 |
 
 ### Memory, MiB (lower is better)
 
@@ -245,20 +247,21 @@ FrankenPHP, in both modes, is alone.
 
 | Build                       | OPcache on: fpm | frankenphp-classic | worker | prefork | frankenphp | OPcache off: fpm | frankenphp-classic | worker | prefork | frankenphp |
 |-----------------------------|----------------:|-------------------:|-------:|--------:|-----------:|-----------------:|-------------------:|-------:|--------:|-----------:|
-| Gluo                        |              48 |                 46 |    108 |      59 |         50 |               58 |                 54 |     94 |      62 |         58 |
-| Symfony API                 |              61 |                 58 |    162 |      84 |         66 |               97 |                 93 |    141 |     113 |         98 |
-| CakePHP API                 |              55 |                 51 |    160 |      96 |         60 |               74 |                 76 |    141 |     110 |         78 |
-| CodeIgniter API             |              55 |                 52 |    126 |      71 |         60 |               75 |                 72 |    109 |      79 |         73 |
-| Laravel API, new app        |              74 |                 69 |    224 |     111 |        109 |              142 |                139 |    183 |     133 |        180 |
-| Laravel API, shared         |              74 |                 69 |    220 |     107 |        100 |              142 |                139 |    181 |     115 |        146 |
-| Symfony full-stack          |              68 |                 65 |    208 |     116 |         80 |              106 |                103 |    184 |     151 |        124 |
-| CakePHP full-stack          |              61 |                 56 |    173 |     104 |         65 |               85 |                 80 |    149 |     119 |         90 |
-| CodeIgniter full-stack      |              71 |                 67 |    150 |      90 |         79 |               91 |                 88 |    135 |     105 |        101 |
-| Laravel full-stack, new app |              99 |                 96 |    309 |     181 |        201 |              171 |                167 |    274 |     241 |        291 |
-| Laravel full-stack, shared  |              99 |                 96 |    259 |     138 |        131 |              171 |                167 |    218 |     149 |        183 |
+| Gluo                        |              48 |                 44 |    108 |      59 |         51 |               59 |                 55 |     92 |      63 |         57 |
+| Symfony API                 |              60 |                 59 |    161 |      85 |         67 |               97 |                 93 |    142 |     112 |         99 |
+| CakePHP API                 |              56 |                 51 |    161 |      96 |         62 |               76 |                 75 |    142 |     110 |         78 |
+| CodeIgniter API             |              56 |                 51 |    127 |      72 |         60 |               76 |                 72 |    108 |      80 |         74 |
+| Laravel API, new app        |              73 |                 71 |    146 |     104 |        108 |              143 |                139 |    114 |     166 |        179 |
+| Laravel API, shared         |              73 |                 71 |    221 |     107 |        102 |              143 |                139 |    181 |     114 |        146 |
+| Symfony full-stack          |              67 |                 66 |    208 |     118 |         82 |              106 |                101 |    184 |     152 |        125 |
+| CakePHP full-stack          |              61 |                 56 |    173 |     109 |         65 |               85 |                 75 |    152 |     120 |         89 |
+| CodeIgniter full-stack      |              70 |                 68 |    149 |      89 |         79 |               91 |                 87 |    134 |     104 |        101 |
+| Laravel full-stack, new app |              99 |                 96 |    244 |     182 |        206 |              170 |                167 |    275 |     243 |        294 |
+| Laravel full-stack, shared  |              99 |                 96 |    259 |     137 |        134 |              170 |                167 |    219 |     149 |        184 |
 
 Laravel with a new application per request is measured at whatever point `-max-requests 30` left it,
-so its memory moves between rounds (131 to 178 MiB, API prefork with OPcache off).
+so its memory moves between rounds (146 to 218 MiB, API worker with OPcache; 91 to 112 MiB on
+prefork).
 
 ### Each step, OPcache on
 
@@ -266,24 +269,24 @@ Prefork and FrankenPHP, in ms. "page" is the login page, `list1` and `list2` are
 
 | Build                      | Server     | page | log in | list1 | list2 | get | edit |  add | 7 steps |
 |----------------------------|------------|-----:|-------:|------:|------:|----:|-----:|-----:|--------:|
-| Gluo                       | prefork    |    — |    211 |   2.6 |   2.6 | 1.0 |  8.4 |  8.3 |      27 |
-|                            | frankenphp |    — |    200 |   2.1 |   1.9 | 0.8 |  7.8 |  7.4 |      24 |
-| Symfony API                | prefork    |    — |    400 |   4.1 |   3.5 | 2.3 | 11.1 |  8.9 |      35 |
-|                            | frankenphp |    — |    381 |   3.1 |   2.6 | 1.7 | 10.6 |  8.0 |      31 |
-| CakePHP API                | prefork    |    — |    196 |   3.6 |   3.3 | 2.0 | 11.9 |  9.3 |      35 |
-|                            | frankenphp |    — |    191 |   2.8 |   2.5 | 1.6 | 10.0 |  8.3 |      30 |
-| CodeIgniter API            | prefork    |    — |    205 |   7.7 |   6.8 | 6.2 | 13.9 | 12.6 |      60 |
-|                            | frankenphp |    — |    195 |   7.9 |   7.1 | 6.6 | 15.0 | 13.3 |      63 |
-| Laravel API, shared        | prefork    |    — |    224 |   6.4 |   5.7 | 3.4 | 11.9 | 10.7 |      49 |
-|                            | frankenphp |    — |    214 |   5.4 |   5.2 | 3.0 | 10.8 |  9.4 |      44 |
-| Symfony full-stack         | prefork    |  2.7 |    420 |   6.6 |   6.3 | 4.2 | 17.9 | 19.3 |      67 |
-|                            | frankenphp |  2.4 |    394 |   5.7 |   5.4 | 3.8 | 19.4 | 17.3 |      62 |
-| CakePHP full-stack         | prefork    |  2.5 |    210 |  10.4 |   9.9 | 3.5 | 18.2 | 17.8 |      80 |
-|                            | frankenphp |  2.0 |    199 |   9.2 |   9.1 | 2.9 | 17.9 | 16.8 |      74 |
-| CodeIgniter full-stack     | prefork    |  6.1 |    239 |  18.2 |  18.6 | 8.3 | 31.5 | 39.1 |     152 |
-|                            | frankenphp |  6.5 |    233 |  18.5 |  19.1 | 9.5 | 34.1 | 41.6 |     160 |
-| Laravel full-stack, shared | prefork    | 15.3 |    453 |  33.5 |  34.0 | 9.6 | 49.9 | 49.8 |     247 |
-|                            | frankenphp | 13.5 |    430 |  33.1 |  34.5 | 8.5 | 47.7 | 46.6 |     239 |
+| Gluo                       | prefork    |    — |    194 |   1.7 |   1.6 | 0.9 |  9.5 |  9.2 |      26 |
+|                            | frankenphp |    — |    181 |   1.4 |   1.2 | 0.7 |  8.8 |  8.7 |      23 |
+| Symfony API                | prefork    |    — |    361 |   3.2 |   2.9 | 1.8 | 12.3 |  9.8 |      35 |
+|                            | frankenphp |    — |    341 |   2.7 |   2.5 | 1.6 | 23.3 |  8.8 |      43 |
+| CakePHP API                | prefork    |    — |    179 |   3.5 |   3.0 | 1.8 | 14.0 | 10.4 |      37 |
+|                            | frankenphp |    — |    170 |   2.7 |   2.5 | 1.5 | 12.0 |  9.6 |      32 |
+| CodeIgniter API            | prefork    |    — |    185 |   7.5 |   6.5 | 5.3 | 16.9 | 13.7 |      61 |
+|                            | frankenphp |    — |    176 |   8.3 |   6.6 | 5.9 | 15.9 | 13.4 |      62 |
+| Laravel API, shared        | prefork    |    — |    209 |   5.4 |   5.3 | 3.1 | 11.2 | 11.3 |      46 |
+|                            | frankenphp |    — |    197 |   4.9 |   4.5 | 2.6 | 10.5 | 10.2 |      42 |
+| Symfony full-stack         | prefork    |  2.4 |    367 |   6.6 |   6.1 | 4.1 | 17.7 | 18.4 |      65 |
+|                            | frankenphp |  2.1 |    347 |   5.2 |   5.0 | 3.5 | 16.8 | 16.4 |      57 |
+| CakePHP full-stack         | prefork    |  2.3 |    186 |   9.7 |   9.2 | 3.1 | 26.1 | 19.2 |      86 |
+|                            | frankenphp |  1.8 |    176 |   8.2 |   7.8 | 2.7 | 16.6 | 15.0 |      66 |
+| CodeIgniter full-stack     | prefork    |  5.5 |    212 |  16.6 |  15.9 | 7.1 | 28.6 | 35.5 |     136 |
+|                            | frankenphp |  5.8 |    206 |  16.3 |  16.4 | 7.9 | 30.5 | 37.1 |     140 |
+| Laravel full-stack, shared | prefork    | 14.6 |    417 |  30.1 |  30.1 | 9.2 | 44.4 | 44.6 |     220 |
+|                            | frankenphp | 13.3 |    404 |  29.8 |  30.0 | 8.2 | 43.0 | 43.5 |     217 |
 
 Every step of every run, with p50, p99 and the CPU, is in [`benchmark/results.tsv`](../benchmark/results.tsv).
 With 100 journeys, its `p99` is the slowest journey.
