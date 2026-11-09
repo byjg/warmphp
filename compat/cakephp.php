@@ -1,6 +1,6 @@
 <?php
 
-// CakePHP in callable mode: one Application for the worker. This is Cake\Http\Server::run()
+// CakePHP in worker mode: one Application for the worker. This is Cake\Http\Server::run()
 // without its bootstrap() call, which runs once here instead of on every request.
 
 use App\Application;

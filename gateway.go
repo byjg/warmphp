@@ -40,9 +40,12 @@ func newGateway(cfg config) (g *gateway, err error) {
 	if err != nil {
 		return nil, err
 	}
+	if cfg.watch && cfg.prefork {
+		return nil, errors.New("-watch can't be used with -mode prefork: the forked workers keep the master's code; use -mode worker in development")
+	}
 	if cfg.prefork && len(found.PreforkMissing) > 0 {
-		return nil, fmt.Errorf("-prefork needs PHP's pcntl and posix extensions, and this PHP lacks %s: "+
-			"install them (see Requirements in the README), or run without -prefork", strings.Join(found.PreforkMissing, ", "))
+		return nil, fmt.Errorf("-mode prefork needs PHP's pcntl and posix extensions, and this PHP lacks %s: "+
+			"install them (see Requirements in the README), or use -mode worker", strings.Join(found.PreforkMissing, ", "))
 	}
 	cfg.disableFunctions = found.DisableFunctions
 
@@ -60,7 +63,7 @@ type probed struct {
 }
 
 // probePHP runs the PHP command once before any worker starts. worker.php redefines header(),
-// setcookie(), ... which PHP only allows for disabled functions, -prefork needs functions a PHP
+// setcookie(), ... which PHP only allows for disabled functions, -mode prefork needs functions a PHP
 // build may not have, and every request goes to PHP on its stdin: the probe reads a line there.
 func probePHP(cfg config) (probed, error) {
 	var found probed

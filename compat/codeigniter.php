@@ -1,6 +1,6 @@
 <?php
 
-// CodeIgniter in callable mode, following the worker CodeIgniter 4.7 ships for FrankenPHP
+// CodeIgniter in worker mode, following the worker CodeIgniter 4.7 ships for FrankenPHP
 // (vendor/codeigniter4/framework/system/Commands/Worker/Views/frankenphp-worker.php.tpl).
 
 use CodeIgniter\Boot;

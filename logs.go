@@ -125,7 +125,7 @@ func (l *logWriter) flush(timeout time.Duration) {
 }
 
 // phpLog turns what PHP processes write to one stderr pipe into log records. A worker of its own
-// has its pipe, so it serves one request at a time. With -prefork all the workers share the
+// has its pipe, so it serves one request at a time. With -mode prefork all the workers share the
 // master's: a line is tied to a request only when one request is running, because otherwise
 // nothing says whose it is, and no id is better than a wrong one.
 type phpLog struct {

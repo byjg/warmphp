@@ -2,7 +2,7 @@
 
 package main
 
-// PHP-FPM, warmphp (with and without -prefork) and FrankenPHP (classic and worker mode) on the builds
+// PHP-FPM, warmphp (-mode worker and prefork) and FrankenPHP (classic and worker mode) on the builds
 // of gluo-framework-comparison: every framework serves the same crud journey (see
 // docs/benchmark.md), with OPcache on and off.
 //
@@ -609,10 +609,10 @@ func startWorkers(t *testing.T, target benchTarget, root, opcache string, c int)
 	return startBenchGateway(t, target, root, opcache, c, "")
 }
 
-// startPrefork is startWorkers with -prefork: one master boots the application and forks the C
+// startPrefork is startWorkers with -mode prefork: one master boots the application and forks the C
 // workers, which share its OPcache and memory and talk to the gateway over a Unix socket
 func startPrefork(t *testing.T, target benchTarget, root, opcache string, c int) string {
-	return startBenchGateway(t, target, root, opcache, c, "-prefork")
+	return startBenchGateway(t, target, root, opcache, c, "-mode prefork")
 }
 
 func startBenchGateway(t *testing.T, target benchTarget, root, opcache string, c int, flags string) string {

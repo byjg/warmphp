@@ -36,7 +36,7 @@ goes through the same PHP process: anonymous access redirected to login, wrong p
 list, **an anonymous client right after an admin request** (the leak check), create, edit,
 soft delete, logout. Gluo's scenario is the same over its JSON API, with a JWT.
 
-| Build                          | Front controller as is (`-mode script`)                          | Boot file (`-mode callable`) | Leak check      | Memory                       |
+| Build                          | Front controller as is (`-mode legacy`)                          | Boot file (`-mode worker`) | Leak check      | Memory                       |
 |--------------------------------|------------------------------------------------------------------|------------------------------|-----------------|------------------------------|
 | Symfony                        | ⚠️ works, but its runtime calls `exit`: a new worker per request  | ✅ full scenario              | ✅ no leak       | prod +1 KB/request, dev +3 KB/request |
 | CakePHP                        | ✅ pages render (not tested further)                              | ✅ full scenario              | ✅ no leak       | flat                         |
@@ -93,7 +93,7 @@ Laravel's Inertia screens post JSON, so the Laravel test proves this path. The A
 
 ### 3. Front controllers cannot be included twice
 
-`-mode script` runs `public/index.php` again on every request, which these files do not expect:
+`-mode legacy` runs `public/index.php` again on every request, which these files do not expect:
 
 | Build       | What happens                                                                                          |
 |-------------|-------------------------------------------------------------------------------------------------------|

@@ -22,14 +22,14 @@ Caddy / HAProxy / nginx / static-httpserver
 
 ## Requirements
 
-Any PHP 8.1 or newer CLI: a distribution's package or any image, nothing built for WarmPHP. `-prefork`
+Any PHP 8.1 or newer CLI: a distribution's package or any image, nothing built for WarmPHP. `-mode prefork`
 also needs the `pcntl` and `posix` extensions; `php_memory_kb` in the logs needs PHP 8.2. Go only to
 build it.
 
-Without `pcntl` or `posix`, the gateway refuses `-prefork` when it starts and names what is missing.
+Without `pcntl` or `posix`, the gateway refuses `-mode prefork` when it starts and names what is missing.
 The gateway's tests pass with:
 
-| PHP | Version | For `-prefork` |
+| PHP | Version | For `-mode prefork` |
 |-----|---------|----------------|
 | Ubuntu 26.04, `apt install php-cli` | 8.5.4 | nothing more |
 | Fedora 44, `dnf install php-cli` | 8.5.12 | `dnf install php-process` (`posix`) |
@@ -62,20 +62,110 @@ errors.
 
 ## Modes
 
-| Mode                 | Entry file                                                    | What stays in memory                                          |
-|----------------------|---------------------------------------------------------------|---------------------------------------------------------------|
-| `callable` (default) | Runs once and **returns a callable**, which handles each request | Everything: container, routes, connections, caches            |
-| `script`             | Included again on every request (front controller)            | Loaded classes, static properties, `$GLOBALS`; objects are rebuilt |
+Every mode runs **persistent `php` CLI processes** (no threads): a worker serves one request at a
+time and lives until it is replaced. `-mode` chooses what the entry file is and how the workers start:
+
+| `-mode`            | Entry file                                                         | How the workers start                                                    | What stays in memory between requests                                    |
+|--------------------|--------------------------------------------------------------------|--------------------------------------------------------------------------|--------------------------------------------------------------------------|
+| `worker` (default) | Runs **once** and **returns a callable**, which handles each request | Each one is a `php` process of its own, which boots the application    | Everything the entry built: container, routes, connections, caches      |
+| `prefork`          | The same as `worker`                                               | One master boots the application once and **forks** them ([Pre-fork](#pre-fork)) | The same as `worker`; the workers share the master's memory and OPcache |
+| `legacy`           | A **front controller** (`index.php`), included **on every request**  | As `worker`                                                              | Every class, function and constant loaded, every `require_once` file, static properties, `$GLOBALS` |
 
 ```php
 <?php
-// callable mode
+// -mode worker and -mode prefork: the entry returns the request handler
 $app = buildMyApplication();           // once per worker
 return static fn() => $app->handle();  // every request
 ```
 
-In `script` mode, declare functions and classes in files loaded with `require_once`.
-Declaring them in the entry file fails with "Cannot redeclare" on the second request.
+### Coming from FrankenPHP or RoadRunner
+
+| You know                          | In WarmPHP                                                                        |
+|-----------------------------------|-----------------------------------------------------------------------------------|
+| FrankenPHP worker mode, RoadRunner | `-mode worker`: the entry returns a callable instead of looping over `frankenphp_handle_request()` |
+| PHP-FPM's pre-fork of the children | `-mode prefork`                                                                   |
+| FrankenPHP classic mode, PHP-FPM   | **No equivalent.** They start each request from nothing; no WarmPHP mode does. `-mode legacy` looks like them, but its process stays loaded (below) |
+| FrankenPHP's `watch`               | `-watch` ([Development](#development--watch))                                    |
+
+### When to use each mode
+
+| Situation                                                                 | Use                                   | Why                                                                  |
+|---------------------------------------------------------------------------|---------------------------------------|----------------------------------------------------------------------|
+| A framework of [`compat/`](compat) (`-framework`), or an entry that returns a callable | `-mode worker`                 | The default: boots once per worker, no `pcntl` needed                |
+| The same in production, when memory counts or there are many workers      | `-mode prefork`                       | One boot, shared OPcache and memory (Gluo, 4 workers: 59 MiB against 108) |
+| A PHP without `pcntl` and `posix` (Docker's `php:*-cli`, Fedora without `php-process`) | `-mode worker`             | `prefork` needs them                                                 |
+| Development, editing the code                                             | `-mode worker -watch` (or `legacy -watch`) | The next request after a save runs the new code; not with `prefork` |
+| An application that only has a front controller, and is not rewritten yet | `-mode legacy`                        | Runs it as it is; read the rules below first                         |
+| An application that must start every request from nothing                 | Not WarmPHP: PHP-FPM or FrankenPHP classic | Every WarmPHP mode keeps the process, and what it loaded, between requests |
+
+### `-mode legacy`: a front controller in a persistent process
+
+`-mode legacy` includes the entry file again on every request, as a web server runs `index.php`. It
+is **not** a fresh start per request, as PHP-FPM or FrankenPHP's classic mode are: the worker
+process stays, and so does everything PHP loaded in it.
+
+| What                                                          | On the next request                                            |
+|---------------------------------------------------------------|----------------------------------------------------------------|
+| The entry file itself                                         | Runs again, read again                                         |
+| Files the entry loads with `require` / `include`              | Run again                                                      |
+| Files loaded with `require_once` / `include_once`             | **Skipped**: `require_once` returns `true`, and an edit to them is not seen |
+| Classes (autoloaded or not), functions, constants             | **Kept**, from the first request. Declaring them again fails: "Cannot redeclare" |
+| Static properties, `$GLOBALS`, singletons                     | **Kept**: state one request leaves there is seen by the next   |
+| Local variables, objects the entry creates                    | Rebuilt                                                        |
+
+So, in a front controller run with `-mode legacy`:
+
+- Declare functions and classes in files loaded with `require_once` (or the autoloader), never in the
+  entry file: the second request fails with "Cannot redeclare".
+- Use `require_once` for what defines things, `require` for what must run on every request.
+- Do not keep per-request state in static properties, globals or singletons, or reset it at the
+  start of the entry.
+- `define()` in the entry warns on the second request ("already defined"): guard it with
+  `defined()`.
+- An entry that calls `exit()` after each response (Symfony's runtime, CodeIgniter) works, but the
+  worker is replaced every time: nothing stays warm. [docs/compatibility.md](docs/compatibility.md)
+  lists what each framework's `public/index.php` does in `-mode legacy`; the frameworks there run in
+  `-mode worker` through their boot files instead.
+
+[`examples/legacy`](examples/legacy) is a front controller written for it:
+
+```bash
+./warmphp -mode legacy examples/legacy/index.php
+curl 'localhost:8080/?name=joao'
+```
+
+### Development: `-watch`
+
+A worker keeps the code it booted with (in `-mode legacy`, the files it loaded): an edit is not seen
+until the worker is replaced. `-watch` replaces them when a file of the application changes:
+
+```bash
+./warmphp -mode worker -watch -workers 1 public/app.php
+```
+
+- It watches the folder given by `-project-root` (or `PROJECT_ROOT`), otherwise the nearest folder
+  up from the entry with a `composer.json`. It polls the `.php`, `.env`, `.json`, `.yaml`/`.yml`,
+  `.ini`, `.xml` and `.neon` files every 500 ms, and `vendor/composer/installed.json` for `composer
+  install` and `update`.
+- It skips `.git`, `.idea`, `.vscode`, `node_modules`, `vendor` and the folders frameworks write to
+  while serving: `var`, `storage`, `writable`, `tmp`, `cache`, `logs`. A write there would replace
+  the workers on every request.
+- After a change, **the next request runs the new code**: idle workers are replaced at once, a busy
+  one when its request ends, and a worker started before the change is never handed a request (the
+  request waits for the new one to boot).
+- The log says what changed, and when every worker runs the new code (the paths are relative to
+  the watched folder; up to 5 are named, then counted):
+
+  ```
+  {"level":"INFO","msg":"code changed, replacing the workers","files":2,"changed":"src/Model/User.php, config/dev/config.php"}
+  {"level":"INFO","msg":"reloaded: every worker runs the new code","changed":"src/Model/User.php, config/dev/config.php","workers":4,"ms":262.4}
+  ```
+
+  `ms` is from the change to the last worker up, so it includes a request that was running then.
+- Code that does not boot (a typo) is retried every second until it does: each try logs PHP's error
+  and a warning, and there is no `reloaded` until it boots.
+- Not with `-mode prefork`: the gateway refuses it. For development only: in production a worker is
+  replaced by a deploy, not by a file that changes.
 
 ## What the worker provides on each request
 
@@ -153,7 +243,7 @@ leaks found.
 
 [docs/benchmark.md](docs/benchmark.md) runs the same journey (log in, page through the products, read
 one, edit it, add one, page again) on each framework, served by nginx with PHP-FPM, by nginx with the
-gateway (with and without `-prefork`) and by FrankenPHP (classic and worker mode), with OPcache on and off.
+gateway (`-mode worker` and `-mode prefork`) and by FrankenPHP (classic and worker mode), with OPcache on and off.
 `make benchmark` runs it; it takes hours, and its `BENCH_*` variables select what runs, e.g.
 `make benchmark BENCH_ONLY=gluo BENCH_JOURNEYS=10`.
 
@@ -170,14 +260,14 @@ and the best choice for each framework.
 | `-framework`     |                  | Runs the embedded entry of this framework, instead of an entry file: `cakephp`, `codeigniter`, `gluo`, `laravel-fresh`, `laravel-shared` or `symfony` |
 | `-project-root`  |                  | The application's folder, given to PHP as `PROJECT_ROOT`; overrides that variable |
 | `-extract`       |                  | Writes the embedded PHP files to this folder, which must be empty, and exits |
-| `-mode`          | `callable`       | `callable` or `script`                                               |
+| `-mode`          | `worker`         | `worker`, `prefork` or `legacy` ([Modes](#modes)); `-framework` runs in `worker` or `prefork` |
 | `-workers`       | number of CPUs   | Number of PHP processes                                              |
 | `-max-requests`  | `0`              | Replace a worker after this many requests (0 = never)                |
+| `-watch`         | off              | Development: replace the workers when a file of the application changes ([`-watch`](#development--watch)); not with `-mode prefork` |
 | `-timeout`       | `30s`            | Maximum time to wait for a worker and process a request (then 504 and the worker is killed) |
 | `-boot-timeout`  | `30s`            | Maximum time for a worker to boot                                    |
 | `-max-body`      | `32MiB`          | Maximum request body (413 above it)                                  |
 | `-upload-dir`    | system temp dir  | Where uploaded files and the embedded PHP files are written; PHP must see the same path |
-| `-prefork`       | off              | Boot once in a master that forks the workers (see below); needs `pcntl` and `posix` |
 
 Running PHP in Docker works too. Use `--init`, so PHP is not PID 1 and stops on SIGTERM, and use `-i`
 for stdin:
@@ -220,7 +310,7 @@ stack trace in one record and the level taken from PHP's prefix:
 | `trace_id`           | From the `traceparent` header, when the request has one; PHP sees that header too  |
 
 - `request_id` ties PHP's lines to the request. A worker of its own has its own stderr, so they are
-  always tied. With `-prefork` all the workers share one, so a line gets the id only when one request
+  always tied. With `-mode prefork` all the workers share one, so a line gets the id only when one request
   is running: under load many have none. It is never another request's id.
 - Only what reaches stderr is captured. An application that logs to a file keeps doing so; Laravel
   logs to stderr with `LOG_CHANNEL=stderr`. Errors a framework catches go to its logger.
@@ -311,8 +401,8 @@ Replace `debug` with the exporter of your backend.
 
 ## Pre-fork
 
-Without `-prefork`, every worker is a `php` process of its own: it boots the application, and the
-CLI gives it its own OPcache. With `-prefork`, one master process boots the application and forks
+With `-mode worker`, every worker is a `php` process of its own: it boots the application, and the
+CLI gives it its own OPcache. With `-mode prefork`, one master process boots the application and forks
 the workers with `pcntl_fork()`, as PHP-FPM forks its children: they share the master's OPcache, and
 its memory until they write to it. With 4 workers, Gluo's container goes from 108 to 59 MiB.
 
@@ -330,13 +420,14 @@ its memory until they write to it. With 4 workers, Gluo's container goes from 10
 
 ## Protocol
 
-Workers start as `php -d disable_functions=<list> worker.php <mode> <entry>`; the gateway gets
-`<list>` once from `php worker.php probe`, a JSON object that also names what `-prefork` needs and
+Workers start as `php -d disable_functions=<list> worker.php <mode> <entry>`, where `<mode>` is how
+the entry runs: `callable` for `-mode worker` and `prefork`, `script` for `-mode legacy`. The gateway gets
+`<list>` once from `php worker.php probe`, a JSON object that also names what `-mode prefork` needs and
 this PHP lacks (`pcntl_fork`, `pcntl_waitpid`, `posix_kill`), and echoes a line the gateway wrote
 on its stdin. The gateway stops there when the command cannot run, fails, does not run
 `worker.php`, or does not pass stdin through to PHP, saying which. Later, if as many workers as
 `-workers` end before any request was answered, it stops too, instead of replacing them forever.
-With `-prefork`, the master starts as
+With `-mode prefork`, the master starts as
 `php -d disable_functions=<list> worker.php <mode> <entry> <socket> <workers>`, and each forked
 worker speaks the protocol on its connection to `<socket>` instead of stdin and stdout. With
 `-project-root`, `--project-root=<dir>` comes last, and the worker sets `PROJECT_ROOT` before it

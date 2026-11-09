@@ -1,6 +1,6 @@
 <?php
 
-// Laravel in callable mode with a NEW application per request: public/index.php
+// Laravel in worker mode with a NEW application per request: public/index.php
 // without re-including it. Only the autoloader and loaded classes stay in memory.
 
 use Illuminate\Http\Request;

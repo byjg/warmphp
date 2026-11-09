@@ -8,15 +8,15 @@ The binary carries its PHP files, so it runs from any folder, on its own.
 
 ## Install PHP
 
-WarmPHP uses the PHP you already have: nothing is built for it. `-prefork` also needs the `pcntl`
-and `posix` extensions. Without them the gateway refuses `-prefork` when it starts and names what is
+WarmPHP uses the PHP you already have: nothing is built for it. `-mode prefork` also needs the `pcntl`
+and `posix` extensions. Without them the gateway refuses `-mode prefork` when it starts and names what is
 missing, for example:
 
 ```
--prefork needs PHP's pcntl and posix extensions, and this PHP lacks posix_kill: install them (see Requirements in the README), or run without -prefork
+-mode prefork needs PHP's pcntl and posix extensions, and this PHP lacks posix_kill: install them (see Requirements in the README), or use -mode worker
 ```
 
-The plain workers (no `-prefork`) need neither.
+`-mode worker` and `-mode legacy` need neither.
 
 ### Ubuntu (apt)
 
@@ -33,11 +33,11 @@ Tested on Ubuntu 26.04, PHP 8.5.4.
 sudo dnf install php-cli php-process   # php-process brings posix; pcntl is in php-cli
 ```
 
-Without `php-process`, `-prefork` is refused for `posix_kill`. Tested on Fedora 44, PHP 8.5.12.
+Without `php-process`, `-mode prefork` is refused for `posix_kill`. Tested on Fedora 44, PHP 8.5.12.
 
 ### Docker's official image
 
-`php:8.5-cli` has `posix` but not `pcntl`. As it is, it runs the plain workers; for `-prefork`, add
+`php:8.5-cli` has `posix` but not `pcntl`. As it is, it runs the plain workers; for `-mode prefork`, add
 `pcntl` with the image's own tool:
 
 ```dockerfile
@@ -81,7 +81,7 @@ Call it a few times: `requests_served` grows, because the application is not boo
 ## 3. Run your application
 
 The gateway runs an **entry file**: it boots once per worker (once for all of them with
-`-prefork`), then handles every request.
+`-mode prefork`), then handles every request.
 
 ### 3.1 Your own code
 
@@ -102,13 +102,17 @@ return static function () use ($app): void {
 ./warmphp app.php
 ```
 
-An **old-style `index.php`** that does everything at the top level can run as it is, in script
-mode. It is included again on every request; only the loaded classes stay in memory, so it gains
-less:
+An **old-style `index.php`** that does everything at the top level can run as it is, with
+`-mode legacy`. It is included again on every request, but the worker process stays: the classes,
+functions and `require_once` files it loaded stay loaded, and an edit to them is not seen until the
+worker is replaced. It gains less than `-mode worker`; read the rules in
+[`-mode legacy`](../README.md#-mode-legacy-a-front-controller-in-a-persistent-process) first:
 
 ```bash
-./warmphp -mode script public/index.php
+./warmphp -mode legacy public/index.php
 ```
+
+Which mode for which case: [When to use each mode](../README.md#when-to-use-each-mode).
 
 ### 3.2 Existing frameworks
 
@@ -148,6 +152,21 @@ An entry has to do three things: boot the framework once, return a function that
 framework's request from the globals (`PhpWorker::input()` for the body) and sends its response,
 and reset what the framework keeps per request. Look for the framework's FrankenPHP or RoadRunner
 integration: it does the same.
+
+### 3.3 While you develop: `-watch`
+
+A worker keeps the code it booted with. With `-watch`, the gateway replaces the workers when a file
+of the application changes, and the next request runs the new code:
+
+```bash
+./warmphp -watch -workers 1 app.php
+```
+
+It watches the application's folder (`-project-root`, or the nearest folder with a `composer.json`
+up from the entry), skips `vendor/` and the folders frameworks write to (`var/`, `storage/`,
+`cache/`...), and does not work with `-mode prefork`. The log names the files that changed, then
+says `reloaded: every worker runs the new code` once the new code is up. Details:
+[Development: `-watch`](../README.md#development--watch).
 
 ## 4. The one change in your code
 
@@ -194,13 +213,13 @@ With Caddy it is one line: `reverse_proxy localhost:8080`.
 ## 6. Production settings
 
 ```bash
-./warmphp -listen 127.0.0.1:8080 -workers 4 -prefork -max-requests 1000 -timeout 30s app.php
+./warmphp -listen 127.0.0.1:8080 -workers 4 -mode prefork -max-requests 1000 -timeout 30s app.php
 ```
 
 | Flag                 | What it is for                                                                                  |
 |----------------------|-------------------------------------------------------------------------------------------------|
 | `-workers 4`         | How many requests PHP serves at the same time; about one per CPU core                           |
-| `-prefork`           | Boots once and forks the workers: they share OPcache and memory, so they use much less of it    |
+| `-mode prefork`      | Boots once and forks the workers: they share OPcache and memory, so they use much less of it    |
 | `-max-requests 1000` | Replaces a worker after that many requests, in case your application leaks memory              |
 | `-timeout 30s`       | A request that takes longer gets a 504, and its worker is replaced                              |
 
@@ -240,7 +259,7 @@ The application stays in memory between requests, so:
 
 - **Do not keep request data in static properties or global variables.** The next request, maybe
   another user's, sees it.
-- **With `-prefork`, open database and cache connections on the first request, not at boot**:
+- **With `-mode prefork`, open database and cache connections on the first request, not at boot**:
   a connection opened at boot would be shared by every worker.
 - **A fatal error or `exit()` is fine**: the request is answered and the worker is replaced.
 

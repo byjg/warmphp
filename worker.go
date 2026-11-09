@@ -126,7 +126,7 @@ func readResponse(r io.Reader, boundary []byte) (*phpResponse, error) {
 
 // worker is one long-running PHP process. It serves one request at a time. It is either a
 // `php worker.php` process of its own (cmd, talking over its stdin and stdout), or a process the
-// master forked (-prefork, talking over a Unix socket connection).
+// master forked (-mode prefork, talking over a Unix socket connection).
 type worker struct {
 	cmd    *exec.Cmd // nil for a forked worker
 	in     io.WriteCloser
@@ -139,6 +139,7 @@ type worker struct {
 	timedOut bool
 	pid      int // as PHP sees it: with -php "docker run ...", cmd is the docker client
 	log      *phpLog
+	gen      uint64 // the pool's generation when it started (-watch)
 }
 
 func startWorker(cfg config) (*worker, error) {
@@ -290,18 +291,35 @@ type pool struct {
 	idle    chan *worker
 	closing atomic.Bool
 	pending sync.WaitGroup // workers being replaced
-	master  *master        // -prefork: it forks the workers and replaces them
+	master  *master        // -mode prefork: it forks the workers and replaces them
 	// Until a worker answers a request, workers that end without answering are counted: as many as
 	// the pool holds, and PHP does not work with this command and entry. failed says so.
 	answered atomic.Bool
 	lost     atomic.Int32
 	failed   chan error
+	// generation counts the changes -watch saw: a worker started before the last one is stale
+	generation atomic.Uint64
+	reload     reload // -watch: the workers on the code of the last change, to say when all are
+}
+
+// reload follows the last change -watch saw, until every worker runs its code
+type reload struct {
+	mu      sync.Mutex
+	gen     uint64
+	changed string
+	since   time.Time
+	ready   int
 }
 
 func newPool(cfg config) (*pool, error) {
 	p := &pool{cfg: cfg, idle: make(chan *worker, cfg.workers), failed: make(chan error, 1)}
 	if cfg.prefork {
 		return p, p.startMaster()
+	}
+	var files map[string]fileStamp
+	if cfg.watch {
+		// Before the workers boot: a change made while they boot is not missed
+		files = snapshot(cfg.watchRoot)
 	}
 	errs := make(chan error, cfg.workers)
 	for range cfg.workers {
@@ -321,17 +339,26 @@ func newPool(cfg config) (*pool, error) {
 		p.close()
 		return nil, err
 	}
+	if cfg.watch {
+		slog.Info("watching for changes", "root", cfg.watchRoot)
+		go p.watch(files)
+	}
 	return p, nil
+}
+
+// stale: the worker started before the last change -watch saw, so it runs the old code
+func (p *pool) stale(w *worker) bool {
+	return w.gen != p.generation.Load()
 }
 
 func (p *pool) acquire(ctx context.Context) (*worker, error) {
 	for {
 		select {
 		case w := <-p.idle:
-			if !w.dead() {
+			if !w.dead() && !p.stale(w) {
 				return w, nil
 			}
-			p.release(w, false)
+			p.release(w, !w.dead())
 		case <-ctx.Done():
 			return nil, ctx.Err()
 		}
@@ -348,7 +375,8 @@ func (p *pool) release(w *worker, healthy bool) {
 			"since the gateway started: PHP does not work with this command and entry (its errors are logged above)", p.cfg.workers)
 	}
 	recycle := p.cfg.maxRequests > 0 && w.served >= p.cfg.maxRequests
-	if healthy && !recycle && !p.closing.Load() {
+	stale := p.stale(w)
+	if healthy && !recycle && !stale && !p.closing.Load() {
 		p.idle <- w
 		return
 	}
@@ -357,8 +385,11 @@ func (p *pool) release(w *worker, healthy bool) {
 		reason := "max-requests"
 		if !healthy {
 			reason = "exited or failed"
+		} else if stale {
+			reason = "code changed"
 		}
 		slog.Info("worker replaced", "worker_pid", w.pid, "reason", reason)
+		p.replaced(w)
 	}
 	p.pending.Add(1)
 	go func() {
@@ -372,13 +403,21 @@ func (p *pool) release(w *worker, healthy bool) {
 }
 
 func (p *pool) respawn() {
-	for delay := 100 * time.Millisecond; !p.closing.Load(); delay = min(delay*2, 5*time.Second) {
+	// With -watch, code that does not boot (a typo being fixed) is retried sooner
+	maxDelay := 5 * time.Second
+	if p.cfg.watch {
+		maxDelay = time.Second
+	}
+	for delay := 100 * time.Millisecond; !p.closing.Load(); delay = min(delay*2, maxDelay) {
+		gen := p.generation.Load()
 		w, err := startWorker(p.cfg)
 		if err == nil {
+			w.gen = gen
 			if p.closing.Load() {
 				w.stop(true)
 				return
 			}
+			p.reloaded(w)
 			p.idle <- w
 			return
 		}

@@ -14,7 +14,7 @@ import (
 	"time"
 )
 
-// master is the PHP process of -prefork: it boots the application once and forks the workers,
+// master is the PHP process of -mode prefork: it boots the application once and forks the workers,
 // which share its OPcache and, until they write to it, its memory. Each worker connects to a Unix
 // socket the gateway listens on; the master replaces the ones that exit. Its stdin takes commands
 // ("kill <pid>"), and closing it stops the master and its workers.

@@ -1,11 +1,11 @@
 <?php
 
-// Boot: runs once per worker process (with -prefork, once in the master)
+// Boot: runs once per worker process (with -mode prefork, once in the master)
 echo "boot output must go to stderr, not to the protocol stream\n";
 require __DIR__ . '/Namespaced.php';
 session_save_path(sys_get_temp_dir());
 $boot = bin2hex(random_bytes(4));
-mt_rand(); // seeds mt_rand() at boot: with -prefork, every child must still get its own sequence
+mt_rand(); // seeds mt_rand() at boot: with -mode prefork, every child must still get its own sequence
 $count = 0;
 
 return static function () use ($boot, &$count): void {

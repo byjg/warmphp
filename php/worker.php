@@ -4,12 +4,14 @@
  * Persistent PHP worker for WarmPHP. Plain PHP CLI: no custom SAPI, no FPM, no custom extension.
  *
  * Usage: php -d disable_functions=<list> worker.php <callable|script> <entry.php> [<socket> <workers>] [--project-root=<dir>]
- *        php worker.php probe   (prints <list> and what -prefork lacks, as JSON)
+ *        php worker.php probe   (prints <list> and what -mode prefork lacks, as JSON)
  *
  *   callable  entry.php runs ONCE and returns the request handler (a callable).
  *             Everything it builds (container, routes, connections) stays in memory.
  *   script    entry.php is included again on every request (front-controller style).
  *             Loaded classes and static caches stay in memory, objects do not.
+ *
+ * The gateway's -mode worker and -mode prefork run the entry as callable, -mode legacy as script.
  *
  * --project-root sets PROJECT_ROOT, for the entries of compat/: an argument, because the gateway's
  * environment does not reach a PHP that runs in a container.
@@ -19,7 +21,7 @@
  * the response body, as in a web SAPI. The request's boundary ends the body, followed by the
  * status and headers, framed the same way.
  *
- * With <socket> and <workers> (the gateway's -prefork), this process is a master: it boots the
+ * With <socket> and <workers> (the gateway's -mode prefork), this process is a master: it boots the
  * application once and forks <workers> children, which share its OPcache and, until they write
  * to it, its memory. Each child connects to the gateway's Unix socket and speaks the same protocol
  * there instead of on STDIN and STDOUT. The master replaces the children that exit, and reads
@@ -36,7 +38,7 @@ final class PhpWorker
         'setcookie', 'setrawcookie', 'is_uploaded_file', 'move_uploaded_file',
     ];
 
-    /** What the -prefork master calls: the pcntl and posix extensions, not disabled */
+    /** What the -mode prefork master calls: the pcntl and posix extensions, not disabled */
     public const PREFORK_FUNCTIONS = ['pcntl_fork', 'pcntl_waitpid', 'posix_kill'];
 
     private const COOKIE_INVALID_CHARS = ",; \t\r\n\013\014";
@@ -232,7 +234,7 @@ final class PhpWorker
             : require $entry;
 
         if (!is_callable($handler)) {
-            fwrite(STDERR, "$entry must return a callable when the worker runs in callable mode\n");
+            fwrite(STDERR, "$entry must return a callable in -mode worker and prefork (a front controller runs in -mode legacy)\n");
             exit(1);
         }
 
@@ -680,7 +682,7 @@ final class PhpWorker
 }
 
 // The gateway asks, before it starts any worker, for the disable_functions value to start them with
-// (php.ini's own list plus ours), for what -prefork needs that this PHP lacks, and for the line it
+// (php.ini's own list plus ours), for what -mode prefork needs that this PHP lacks, and for the line it
 // wrote on STDIN, which shows that the requests will reach PHP
 if ($argc === 2 && $argv[1] === 'probe') {
     $current = array_filter(array_map('trim', explode(',', (string)ini_get('disable_functions'))));

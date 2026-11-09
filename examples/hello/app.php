@@ -1,6 +1,6 @@
 <?php
 
-// Callable mode: this part runs ONCE per worker. Anything built here stays in memory.
+// -mode worker (the default): this part runs ONCE per worker. Anything built here stays in memory.
 $bootedAt = date('c');
 $requests = 0;
 

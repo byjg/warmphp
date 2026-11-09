@@ -594,15 +594,15 @@ func prefork(workers int) func(*config) {
 	}
 }
 
-// A PHP without posix, as Fedora's php-cli without php-process: -prefork is refused before
+// A PHP without posix, as Fedora's php-cli without php-process: -mode prefork is refused before
 // anything boots, and the plain workers, which do not need it, still start
 func TestPreforkRefusesAPHPWithoutItsExtensions(t *testing.T) {
 	cfg := testConfig(t, "callable", "testdata/app.php")
 	cfg.php = append(cfg.php, "-d", "disable_functions=posix_kill")
 	cfg.prefork = true
 	_, err := newGateway(cfg)
-	if err == nil || !strings.Contains(err.Error(), "-prefork needs PHP's pcntl and posix extensions, and this PHP lacks posix_kill") {
-		t.Fatalf("expected the gateway to refuse -prefork, got %v", err)
+	if err == nil || !strings.Contains(err.Error(), "-mode prefork needs PHP's pcntl and posix extensions, and this PHP lacks posix_kill") {
+		t.Fatalf("expected the gateway to refuse -mode prefork, got %v", err)
 	}
 
 	cfg.prefork = false

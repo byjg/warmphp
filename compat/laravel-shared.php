@@ -1,6 +1,6 @@
 <?php
 
-// Laravel in callable mode with ONE application for the worker. Laravel's singletons assume one
+// Laravel in worker mode with ONE application for the worker. Laravel's singletons assume one
 // request per process, so the state of a request is reset before the next one, with what Octane's
 // FlushSessionState, FlushAuthenticationState, FlushArrayCache and FlushQueuedCookies do. Without
 // it, the session keeps the previous client's data (its token and its login), its database handler
@@ -20,7 +20,7 @@ require __DIR__ . '/request-body.php';
 
 $app = require $root . '/bootstrap/app.php';
 $kernel = $app->make(Kernel::class);
-// Bootstrapped here, not on the first request: with -prefork, the workers share it
+// Bootstrapped here, not on the first request: with -mode prefork, the workers share it
 $kernel->bootstrap();
 
 return static function () use ($app, $kernel): void {
