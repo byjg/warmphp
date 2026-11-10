@@ -27,6 +27,13 @@ Caddy / HAProxy / nginx / static-httpserver
  php worker.php   php worker.php   php worker.php   ← boot once, stay in memory
 ```
 
+## Documentation
+
+- [Getting started](docs/getting-started.md): installation, applications and deployment.
+- [Framework compatibility](docs/compatibility.md): tested integrations and limitations.
+- [Benchmark](docs/benchmark.md) and [analysis](docs/analysis.md): measurements and how to interpret them.
+- [Log shipping](docs/logging.md) and [worker protocol](docs/protocol.md): operational and implementation references.
+
 ## Requirements
 
 Any PHP 8.1 or newer CLI: a distribution's package or any image, nothing built for WarmPHP. `-mode prefork`
@@ -52,14 +59,15 @@ PHP CLI you point it to.
 
 ### deb/rpm
 
-Add the [ByJG package repository](https://opensource.byjg.com/docs/packages), then:
+WarmPHP deb/rpm packages are provided by the **ByJG package repository**. First follow the
+[repository setup instructions](https://opensource.byjg.com/docs/packages#setup) for your distribution, then:
 
 ```bash
 # Debian/Ubuntu
-apt install warmphp
+sudo apt install warmphp
 
 # Fedora/RHEL
-dnf install warmphp
+sudo dnf install warmphp
 ```
 
 ### Alpine
@@ -97,7 +105,7 @@ version you have.
 
 ## Quick start
 
-New here? [docs/getting-started.md](docs/getting-started.md) covers what most people need: build,
+New here? [docs/getting-started.md](docs/getting-started.md) covers what most people need: install,
 run your application or framework, put nginx in front, production settings.
 
 ```bash
@@ -149,7 +157,7 @@ return static fn() => $app->handle();  // every request
 | Situation                                                                 | Use                                   | Why                                                                  |
 |---------------------------------------------------------------------------|---------------------------------------|----------------------------------------------------------------------|
 | A framework of [`compat/`](https://github.com/byjg/warmphp/tree/master/compat) (`-framework`), or an entry that returns a callable | `-mode worker`                 | The default: boots once per worker, no `pcntl` needed                |
-| The same in production, when memory counts or there are many workers      | `-mode prefork`                       | One boot, shared OPcache and memory (Gluo, 4 workers: 59 MiB against 108) |
+| The same in production, when memory counts or there are many workers      | `-mode prefork`                       | One boot, shared OPcache and memory (Gluo, 4 workers: 59 MiB prefork vs 108 MiB worker, lower is better; [measurement scope](docs/benchmark.md#memory-mib-lower-is-better)) |
 | A PHP without `pcntl` and `posix` (Docker's `php:*-cli`, Fedora without `php-process`) | `-mode worker`             | `prefork` needs them                                                 |
 | Development, editing the code                                             | `-mode worker -watch` (or `legacy -watch`) | The next request after a save runs the new code; not with `prefork` |
 | An application that only has a front controller, and is not rewritten yet | `-mode legacy`                        | Runs it as it is; read the rules below first                         |
@@ -360,12 +368,16 @@ stack trace in one record and the level taken from PHP's prefix:
 | Field                | Meaning                                                                            |
 |----------------------|------------------------------------------------------------------------------------|
 | `path`               | Without the query string, which often carries tokens and personal data             |
-| `duration_ms`        | The whole request, in the gateway                                                  |
-| `queue_ms`           | Waiting for a free worker: when it grows, the application needs more workers       |
-| `php_ms`             | The request in PHP. A timeout or a killed worker has none of the `php_*` fields    |
-| `php_cpu_ms`         | CPU PHP used: `php_ms` far above it means waiting, usually for the database        |
-| `php_memory_kb`      | Peak of PHP's heap above what the worker already held, without OPcache; needs PHP 8.2 |
+| `duration_ms`        | Elapsed milliseconds for the whole request in the gateway, including queue time; lower is better for the same workload                                                  |
+| `queue_ms`           | Milliseconds waiting for a free worker; lower is better. Sustained growth suggests worker saturation; investigate slow requests and capacity       |
+| `php_ms`             | Elapsed milliseconds in PHP; lower is better for the same workload. A timeout or killed worker has none of the `php_*` fields    |
+| `php_cpu_ms`         | CPU time in milliseconds; lower means less CPU work for the same request. `php_ms` far above it suggests waiting, often for the database        |
+| `php_memory_kb`      | Incremental peak PHP heap in **KiB (1,024 bytes)** despite the `_kb` name; above the request-start heap, excluding OPcache. Lower is better for the same workload; needs PHP 8.2 |
+| `bytes` | Response body size in bytes; neither higher nor lower is inherently better |
 | `trace_id`           | From the `traceparent` header, when the request has one; PHP sees that header too  |
+
+Heap peak is not total process or container memory, and does not measure retained growth between
+requests. Compare it only across equivalent requests. One MiB is 1,024 KiB (1,048,576 bytes).
 
 - `request_id` ties PHP's lines to the request. A worker of its own has its own stderr, so they are
   always tied. With `-mode prefork` all the workers share one, so a line gets the id only when one request
@@ -380,89 +392,16 @@ stack trace in one record and the level taken from PHP's prefix:
 
 ### Sending the logs somewhere
 
-The gateway keeps no log file: it writes to stderr, and these are the ways to take the logs from there.
-
-**[Fluent Bit](https://fluentbit.io/), through a pipe.** If it exits, the gateway keeps serving, but
-the logs stop until both are restarted:
-
-```bash
-./warmphp app.php 2>&1 >/dev/null | fluent-bit -i stdin -o stdout
-```
-
-**Docker, with its `fluentd` log driver.** It sends the container's stream to Fluent Bit, wrapping
-each record in a `log` field. With `fluentd-async=true`, the container starts even when Fluent Bit
-is down:
-
-```bash
-docker run --log-driver fluentd --log-opt fluentd-address=127.0.0.1:24224 \
-  --log-opt fluentd-async=true --log-opt tag=warmphp ...
-```
-
-Fluent Bit opens the `log` field with a parser that knows the gateway's time format. In a file, here
-`warmphp.conf`:
-
-```ini
-[PARSER]
-    Name        warmphp
-    Format      json
-    Time_Key    time
-    Time_Format %Y-%m-%dT%H:%M:%S.%L%z
-```
-
-```bash
-fluent-bit -R warmphp.conf -i forward -p port=24224 \
-  -F parser -m '*' -p key_name=log -p parser=warmphp -o stdout -m '*'
-```
-
-Replace `-o stdout` with the output of your backend.
-
-**A file, read by the OpenTelemetry Collector.** Redirect stderr to it, and rotate it with `logrotate`
-and `copytruncate`, as nothing else does:
-
-```bash
-./warmphp app.php 2>> /logs/gateway.log
-```
-
-The [OpenTelemetry Collector](https://opentelemetry.io/docs/collector/) reads the records as logs.
-This configuration of its contrib distribution (tested on 0.164) sets the time, the severity, the body
-and the trace id. `include` is the path as the Collector sees it:
-
-```yaml
-receivers:
-  file_log:
-    include: [/logs/gateway.log]
-    operators:
-      - type: json_parser
-        timestamp:
-          parse_from: attributes.time
-          layout_type: gotime
-          layout: 2006-01-02T15:04:05.999999999Z07:00
-        severity:
-          parse_from: attributes.level
-      - type: move
-        from: attributes.msg
-        to: body
-      - type: trace_parser
-        if: attributes.trace_id != nil
-        trace_id:
-          parse_from: attributes.trace_id
-exporters:
-  debug:
-service:
-  pipelines:
-    logs:
-      receivers: [file_log]
-      exporters: [debug]
-```
-
-Replace `debug` with the exporter of your backend.
+See [Sending logs to a backend](docs/logging.md) for Fluent Bit, Docker and OpenTelemetry Collector configurations.
 
 ## Pre-fork
 
 With `-mode worker`, every worker is a `php` process of its own: it boots the application, and the
 CLI gives it its own OPcache. With `-mode prefork`, one master process boots the application and forks
 the workers with `pcntl_fork()`, as PHP-FPM forks its children: they share the master's OPcache, and
-its memory until they write to it. With 4 workers, Gluo's container goes from 108 to 59 MiB.
+its memory until they write to it. In the [benchmark](docs/benchmark.md#memory-mib-lower-is-better),
+with OPcache on and four PHP workers, Gluo's end-of-run container memory (including nginx) falls
+from 108 MiB in worker mode to 59 MiB in prefork mode, about 45 % less. This is not a peak measurement.
 
 - Each forked worker connects to a Unix socket the gateway listens on, in `-upload-dir` (PHP must
   see it), and speaks the same protocol there. It waits on it for its next request with no time
@@ -478,35 +417,7 @@ its memory until they write to it. With 4 workers, Gluo's container goes from 10
 
 ## Protocol
 
-Workers start as `php -d disable_functions=<list> worker.php <mode> <entry>`, where `<mode>` is how
-the entry runs: `callable` for `-mode worker` and `prefork`, `script` for `-mode legacy`. The gateway gets
-`<list>` once from `php worker.php probe`, a JSON object that also names what `-mode prefork` needs and
-this PHP lacks (`pcntl_fork`, `pcntl_waitpid`, `posix_kill`), and echoes a line the gateway wrote
-on its stdin. The gateway stops there when the command cannot run, fails, does not run
-`worker.php`, or does not pass stdin through to PHP, saying which. Later, if as many workers as
-`-workers` end before any request was answered, it stops too, instead of replacing them forever.
-With `-mode prefork`, the master starts as
-`php -d disable_functions=<list> worker.php <mode> <entry> <socket> <workers>`, and each forked
-worker speaks the protocol on its connection to `<socket>` instead of stdin and stdout. With
-`-project-root`, `--project-root=<dir>` comes last, and the worker sets `PROJECT_ROOT` before it
-loads the entry.
-
-A frame is a 4-byte big-endian length followed by JSON. After booting, the worker sends the frame
-`{"ready":true,"pid":<pid>}`. Then, for each request, the gateway sends a frame on stdin, with a new
-random boundary, followed by the raw request body, and the worker answers on stdout with the raw
-body, the boundary, and a frame:
-
-```text
-gateway → worker   {"boundary":"--warmphp-<random>","id":"<request id>","server":{...CGI vars...},"body_size":<n>,"fields":[[name,value]],"files":[{field,name,type,tmp_name,error,size}]}<n body bytes>
-worker  → gateway  <body bytes>--warmphp-<random>{"status":200,"headers":["Content-Type: text/html"],"metrics":{"ms":23.9,"cpu_ms":6.2,"memory_kb":2840},"exit":false}
-```
-
-Output outside a request, such as boot messages, goes to stderr, so it never mixes with a body.
-Around each request the worker writes `\x01start <id> <pid>` and `\x01end <id>` to stderr, each on a
-line of its own: they come through the pipe in order with PHP's own lines, which is how the gateway
-ties those lines to the request.
-The gateway rejects a frame whose length is absurd (any printable byte read as a length is), answers
-502 and replaces the worker.
+See the [worker protocol reference](docs/protocol.md) for startup, framing and request correlation.
 
 ## Environment variables
 

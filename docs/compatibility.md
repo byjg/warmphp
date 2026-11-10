@@ -41,7 +41,7 @@ goes through the same PHP process: anonymous access redirected to login, wrong p
 list, **an anonymous client right after an admin request** (the leak check), create, edit,
 soft delete, logout. Gluo's scenario is the same over its JSON API, with a JWT.
 
-| Build                          | Front controller as is (`-mode legacy`)                          | Boot file (`-mode worker`) | Leak check      | Memory                       |
+| Build                          | Front controller as is (`-mode legacy`)                          | Boot file (`-mode worker`) | Leak check      | Observed memory growth (lower is better) |
 |--------------------------------|------------------------------------------------------------------|------------------------------|-----------------|------------------------------|
 | Symfony                        | ⚠️ works, but its runtime calls `exit`: a new worker per request  | ✅ full scenario              | ✅ no leak       | prod +1 KB/request, dev +3 KB/request |
 | CakePHP                        | ✅ pages render (not tested further)                              | ✅ full scenario              | ✅ no leak       | flat                         |
@@ -50,11 +50,16 @@ soft delete, logout. Gluo's scenario is the same over its JSON API, with a JWT.
 | CodeIgniter                    | ❌ routed as a CLI command                                        | ✅ full scenario              | ✅ no leak       | flat                         |
 | Gluo                           | ❌ `class App` declared twice; uncaught 404s become 500           | ✅ full scenario              | ✅ no leak       | flat                         |
 
-Average time of the login page (Gluo: the product list, authenticated) over 100 sequential requests after 10 warm-up requests, OPcache on
-(`-d opcache.enable_cli=1`), PHP 8.5 in Docker. "Boots per request" is `php -S` with the
+"Flat" means no growth observed during the test, not a guarantee of constant memory over time.
+"No leak" refers to the anonymous-after-admin check above, not every possible form of shared state.
+The memory growth figures are approximate historical measurements reported in KB/MB; the recorded results do not specify decimal or binary units. They should not be compared directly with the
+benchmark's whole-container MiB readings or the logs' per-request incremental heap peak.
+
+Average response time (**ms; lower is better**) of the login page (Gluo: the product list, authenticated) over 100 sequential requests after 10 warm-up requests, OPcache on
+(`-d opcache.enable_cli=1`), PHP 8.5 in Docker. The PHP development server baseline is `php -S` with the
 project's own router, which boots the application on every request like PHP-FPM:
 
-| Build                                    | Boots per request | Worker  |
+| Build                                    | PHP development server (ms ↓) | WarmPHP worker (ms ↓) |
 |------------------------------------------|------------------:|--------:|
 | Symfony, `APP_ENV=prod`                  | 10.3 ms           | 3.8 ms  |
 | Symfony, `dev` (profiler on)             | 78.9 ms           | 49.4 ms |
@@ -64,10 +69,20 @@ project's own router, which boots the application on every request like PHP-FPM:
 | CodeIgniter (development, debug toolbar) | 14.5 ms           | 9.8 ms  |
 | Gluo, `APP_ENV=dev`                      | 7.1 ms            | 2.5 ms  |
 
-The worker itself stays at 0.46 MB over 2000 requests (`examples/hello`), so the memory growth
-above is the frameworks'.
+The hello example reported about 0.46 MB over 2,000 requests without observed growth. This
+suggests the growth above comes from framework behavior; it is not a long-running memory guarantee.
 
-## Incompatibilities every framework hits
+## Current limitations
+
+- **Laravel** runs in a worker with one application and the resets of `compat/laravel-shared.php`, a part of Octane's; with a new app per request it needs `-max-requests`.
+- An earlier memory test with Laravel, a new app per request, had two requests answered 502
+  (`EOF`), right when memory ran out: the worker died before answering. It did not happen again,
+  with either protocol, and the worker's own memory test (`/memory-full`) gets its 500.
+
+## Framework adaptations and resolved issues
+
+The sections below explain why the boot files are needed and which issues they already handle.
+Application-specific state still needs review, particularly with Laravel's shared application.
 
 ### 1. `PHP_SAPI` is `"cli"`
 
@@ -203,13 +218,6 @@ These worker behaviours were wrong and are fixed, with tests in `gateway_test.go
   the old cookie and then regenerates the id; with the worker's order, the browser deleted the new
   session and was logged out at once. The worker now inserts the cookie before the next header the
   application sets, which is where PHP would have sent it.
-
-## What is left
-
-- **Laravel** runs in a worker with one application and the resets of `compat/laravel-shared.php`, a part of Octane's; with a new app per request it needs `-max-requests`.
-- An earlier memory test with Laravel, a new app per request, had two requests answered 502
-  (`EOF`), right when memory ran out: the worker died before answering. It did not happen again,
-  with either protocol, and the worker's own memory test (`/memory-full`) gets its 500.
 
 ## Reproducing
 

@@ -7,11 +7,19 @@ sidebar_label: "Analysis"
 
 What the [benchmark](benchmark.md) shows: the CRUD journey on 5 frameworks, as APIs and as full
 applications, on PHP-FPM, WarmPHP (`-mode worker` and `-mode prefork`) and FrankenPHP (classic and worker
-mode). All the
-numbers are with OPcache on and 4 PHP workers unless it says otherwise.
+mode). All the numbers are with OPcache on and 4 PHP workers unless it says otherwise.
 
 Sentences marked **(judgment)** are not measured: they come from how each server works, not from
 this benchmark.
+
+**How to read the numbers:** ↑ means higher is better; ↓ means lower is better.
+Journeys/s measures complete journeys per second (higher is better);
+post-login time is the sum of the mean times of seven operations, excluding login (ms; lower is better).
+Container memory is an end-of-run reading (MiB; lower is better), including nginx for PHP-FPM and
+WarmPHP. One MiB is 1,048,576 bytes. These are four-worker measurements with OPcache on.
+Bold numbers mark the best **observed** value, not a statistically established advantage.
+Differences under about 5 % are too close to call in these short runs, and some rows vary more.
+See [measurement method and variation](benchmark.md#results).
 
 ## The short answer
 
@@ -29,8 +37,8 @@ workloads. These results do not establish production capacity or long-running re
   about 6.5 % at the median, and part of that is its PHP build.
 - **The speed is the worker mode, not FrankenPHP**: in its classic mode, which runs the front
   controller on every request, FrankenPHP is FPM's speed, ×1.01 FPM's journeys/s at the median.
-- **Second for speed: WarmPHP with `-mode prefork`**, ahead of FPM, FrankenPHP classic and the plain
-  worker, and it runs the PHP you already have: a distribution's `php-cli` or any image. A PHP
+- **WarmPHP prefork improves on FPM in most tested builds**, while its shared-application
+  throughput is close to WarmPHP worker. It runs the PHP you already have: a distribution's `php-cli` or any image. A PHP
   security fix arrives with your PHP packages, not with a server release; the gateway is a Go binary
   you keep up to date as well **(judgment)**. When memory decides, FPM is the second choice.
 - **Least memory**: the two servers that boot on every request. FrankenPHP classic reads 1–5 MiB
@@ -42,31 +50,44 @@ workloads. These results do not establish production capacity or long-running re
 - **What decides most is not the server**: bcrypt is half or more of each journey, and a Laravel
   application with a new instance per request gives away the gain of any worker.
 
-| | fpm | frankenphp-classic | worker | prefork | frankenphp |
+| | PHP-FPM + nginx | FrankenPHP classic | WarmPHP worker + nginx | WarmPHP prefork + nginx | FrankenPHP worker |
 |--------------------------------------------|-------:|-------:|-------:|-------:|-------:|
-| Journeys/s against FPM (median, range)     |      — | ×1.01 (1.00–1.04) | ×1.08 (0.80–1.18) | ×1.08 (0.97–1.18) | ×1.14 (1.04–1.26) |
-| The 7 steps, faster than FPM (median, range) | — | ×0.97 (0.91–1.03) | ×1.24 (0.63–1.87) | ×1.29 (0.92–1.89) | ×1.46 (1.04–2.08) |
-| Memory against FPM (median, range)         |      — | ×0.97 (0.91–0.98) | ×2.63 (1.99–3.09) | ×1.43 (1.23–1.85) | ×1.12 (1.06–2.09) |
-| Journeys that failed the checks, of 30,600 |      0 |      0 |      0 |      0 |      0 |
+| Throughput ratio: server / FPM (↑) | 1.00× | ×1.01 (1.00–1.04) | ×1.08 (0.80–1.18) | ×1.08 (0.97–1.18) | ×1.14 (1.04–1.26) |
+| Post-login speedup: FPM time / server time (↑) | 1.00× | ×0.97 (0.91–1.03) | ×1.24 (0.63–1.87) | ×1.29 (0.92–1.89) | ×1.46 (1.04–2.08) |
+| Container memory ratio: server / FPM (↓) | 1.00× | ×0.97 (0.91–0.98) | ×2.63 (1.99–3.09) | ×1.43 (1.23–1.85) | ×1.12 (1.06–2.09) |
+| Journeys that failed checks (count; lower is better) |      0 |      0 |      0 |      0 |      0 |
 | Application changed                        |     no |     no |     no |     no |     no |
 | One boot file per framework needed         |     no |     no |    yes |    yes |    yes |
 
-## Best of
+Ratios are unitless: 1.00× is the FPM baseline. The first three rows give the median and min–max range
+of the per-build ratios across 11 configurations, with OPcache on. This is a median across builds,
+not a pooled throughput measurement. Each build uses the round selected by median throughput;
+latency and memory come from that round. A 1.29× speedup means about 22 % less elapsed time
+(`1 − 1/1.29`), while a 1.43× memory ratio means 43 % more memory.
+The zero failures cover **30,600 journeys in total across all servers, OPcache settings and rounds**,
+not 30,600 per server.
 
-| Category                                    | Winner                                   | Numbers                                                                        |
+## Best observed results
+
+These rankings describe this workload and its selected rounds. Near-ties are not established wins.
+Throughout this table, "FrankenPHP" means worker mode unless explicitly marked classic; "prefork" means WarmPHP prefork.
+Throughput is in journeys/s (higher is better); operation times are in ms and memory in MiB
+(lower is better).
+
+| Category                                    | Best observed configuration              | Measurements                                                                        |
 |---------------------------------------------|------------------------------------------|--------------------------------------------------------------------------------|
 | Most journeys/s                             | **CakePHP API on FrankenPHP**            | 19.7; Gluo 19.5; on prefork CakePHP 18.5, Gluo 18.1                            |
 | Most journeys/s, FPM                        | **CakePHP API**                          | 17.1; Gluo 16.8, CodeIgniter API 15.7                                          |
-| Best full application                       | **CakePHP**                              | 16.4 on FrankenPHP, 14.6 on prefork, 13.9 on FPM                               |
+| Highest full-stack throughput (journeys/s)                       | **CakePHP**                              | 16.4 on FrankenPHP, 14.6 on prefork, 13.9 on FPM                               |
 | Lowest combined latency (7 steps)           | **Gluo**                                 | 23 ms; CakePHP and Symfony APIs 32–43 on the workers; with FPM, Gluo 42, CakePHP 53 |
 | Pages of 50 products                        | **Gluo**                                 | 1.2–1.7 ms; CakePHP and Symfony 2.5–3.6                                        |
 | Read one product                            | **Gluo**                                 | 0.7–0.9 ms; 1.5–1.8 for Symfony and CakePHP                                    |
 | Writes (edit + add)                         | **Gluo**                                 | 17 ms; Laravel 21, CakePHP 22, Symfony 22, CodeIgniter 29 (the best of prefork and FrankenPHP) |
 | Least memory                                | **Gluo on FrankenPHP classic or FPM**    | 44 MiB without nginx, 48 with it; 51 on FrankenPHP, 59 on prefork              |
-| Least damage without OPcache                | **Gluo**, among the FPM and classic runs | 10.5 journeys/s, 164 ms on FPM; the other APIs 4.3–8.1, 277–641 ms             |
+| Highest FPM/classic throughput without OPcache                | **Gluo**, among the FPM and classic runs | 10.5 journeys/s, 164 ms on FPM; the other APIs 4.3–8.1, 277–641 ms             |
 | Largest gain from staying booted            | **Laravel API, shared**                  | 87 → 42 ms on FrankenPHP (×2.1), 46 on prefork; Symfony API 65 → 35 on prefork (×1.9) |
 | Smallest gain                               | **CodeIgniter**                          | API 70 → 61 ms at best (prefork), full-stack 175 → 136; full-stack Laravel 270 → 217 |
-| Slowest                                     | **Laravel full-stack**                   | 6.3 journeys/s at best: it has no paging, so each list sends the whole table through Inertia |
+| Lowest full-stack throughput                                     | **Laravel full-stack**                   | 6.3 journeys/s at best: it has no paging, so each list sends the whole table through Inertia |
 
 CakePHP's API and Gluo are level at the top (19.7 against 19.5 on FrankenPHP, 18.5 against 18.1 on
 prefork): CakePHP's login is faster (170 ms against 181 on FrankenPHP), and Gluo's 7 steps are faster
@@ -82,11 +103,12 @@ application freed after every request.
 
 - **Measured, strong**: the least memory with nginx counted, 48–99 MiB; with nginx at 4 processes,
   not this machine's 22, about 35–86 MiB. Only FrankenPHP classic reads less, 1–5 MiB, without nginx.
-  Steady: the slowest journey is 1.05–1.12 × p50, the narrowest of the five.
+  Steady: the slowest journey is 1.05–1.12 times the median journey duration (`p50`), the narrowest of the five.
 - **Measured, weak**: with FrankenPHP classic, the slowest 7 steps in 9 of 11 builds (the plain
   worker is slower with Laravel's new application per request), which is consistent with booting on
   every request: Gluo's 7 steps take 42 ms against 23, Symfony's API 65 against 35. Without OPcache
-  it falls apart, ×1.6 to ×3.1 fewer journeys/s, and so does FrankenPHP classic; no worker does.
+  its throughput falls to about 32–63 % of its OPcache-on value. FrankenPHP classic shows a similar
+  drop; workers are less affected.
 - **Pros (judgment)**: decades in production, every framework runs on it unchanged, no state can
   cross requests, and a bad request cannot corrupt the next one.
 - **Cons (judgment)**: the boot is paid for ever, and it has to be tuned (`pm`, `max_children`). It
@@ -105,11 +127,11 @@ controller on every request, as FPM does: no boot file, no worker.
   2–4 % faster (its PHP build), and its 7 steps are about the same, ×0.97 (0.91–1.03). The lowest memory
   reading in all 11 builds, 44–96 MiB, without nginx in it; with nginx estimated at 4 processes, FPM
   is 7–11 MiB lower. Steady: the slowest journey is 1.07–1.21 × p50.
-- **Measured, weak**: what FPM loses, it loses: ×1.6 to ×3.2 fewer journeys/s without OPcache.
+- **Measured, weak**: without OPcache, throughput falls to about 31–63 % of its OPcache-on value.
   Its 7 steps are up to 9 % slower than FPM's on Symfony (71 against 65 ms as an API, 118 against
   108 full-stack) and 7 % on CodeIgniter's API; the cause was not measured.
 - **The worker mode is FrankenPHP's gain**: on the same PHP build and server, the worker mode gives
-  ×1.13 journeys/s at the median (1.06–1.23) and 7 steps ×1.59 faster (1.21–2.08), with a shared
+  ×1.13 journeys/s at the median (1.06–1.23) and a post-login speedup of 1.59× (classic time / worker time; range 1.21–2.08), with a shared
   application, for ×1.17 the memory (1.14–1.44).
 - **Pros (judgment)**: any application runs as on FPM, with no state crossing requests and no boot
   file. FrankenPHP's deployment: HTTPS, HTTP/2 and HTTP/3, one binary, no FastCGI.
@@ -152,14 +174,15 @@ you depend on an extension that is not thread-safe, or your PHP image is fixed.
 **Strongest at: a worker's speed with what you already run.** The plain PHP CLI, NTS, from a
 distribution package or any image, behind any proxy, close to FrankenPHP in speed and memory.
 
-- **Measured, strong**: ×1.08 FPM's journeys/s and ×1.29 on the 7 steps at the median, up to ×1.89.
+- **Measured, strong**: 8 % more journeys/s and 22 % less post-login time than FPM at the median across builds;
+  the largest post-login reduction is about 47 %.
   The 7 steps are ahead of FrankenPHP on CodeIgniter's API (61 against 62), full-stack CodeIgniter
   (136 against 140) and the Symfony API (35 against 43, FrankenPHP's `edit` step), 3–5 ms behind on
   Gluo, the CakePHP API and both shared Laravel builds (7 to 10 requests, so under 1 ms each), 8 ms
   on full-stack Symfony, and 20 ms on full-stack CakePHP, the largest gap with a shared application
-  (its `edit` step, 26 against 17 ms, in the run with the widest spread, 11 %). It uses ×1.6 to ×2.1
-  less memory than the plain worker (Gluo 108 → 59 MiB, Laravel API 221 → 107), with no loss of
-  speed. With OPcache off and a shared application, its journeys/s stay within 6 % of OPcache on,
+  (its `edit` step, 26 against 17 ms, in the run with the widest spread, 11 %). It uses about 38–52 %
+  less container memory than the plain worker (Gluo 108 → 59 MiB, Laravel API 221 → 107 MiB),
+  with throughput within the observed noise for shared-application builds. With OPcache off and a shared application, its journeys/s stay within 6 % of OPcache on,
   and its memory stays near FPM's on some builds (Gluo 63 against 59 MiB).
 - **Measured, weak**: behind FrankenPHP in journeys/s: under 4 % on CodeIgniter, the Symfony API and
   full-stack Laravel, shared, 6–8 % on Gluo, the CakePHP API, the shared Laravel API and full-stack
@@ -207,7 +230,7 @@ itself.
 
 ### Side by side
 
-| | fpm | frankenphp-classic | worker | prefork | frankenphp |
+| | PHP-FPM + nginx | FrankenPHP classic | WarmPHP worker + nginx | WarmPHP prefork + nginx | FrankenPHP worker |
 |------------------------------------|---------------|----------------|-------------------|-------------------|----------------|
 | Boots the application              | every request | every request  | once per worker   | once              | once per worker |
 | OPcache                            | shared        | shared         | one per worker    | shared            | shared         |
@@ -223,19 +246,23 @@ itself.
 
 ## Each framework
 
-Journeys/s, then the 7 steps in ms, then memory in MiB, with OPcache on. The best of each is in bold.
+↑ means higher is better; ↓ means lower is better. Bold marks the best observed value, including
+near-ties within measurement noise. Post-login time covers seven operations and excludes login.
 FrankenPHP classic, like FPM, boots on every request, and its rows are within a few percent of FPM's;
 its memory is the lowest only because nginx is not in its figure.
 
 ### Gluo
 
-| Server             | journeys/s | 7 steps | memory |
+OPcache on; four PHP workers. Memory is the end-of-run container reading, including nginx for
+PHP-FPM and WarmPHP. Lower times and memory are better; higher throughput is better.
+
+| Server             | Throughput (journeys/s ↑) | Post-login time (ms ↓) | Container memory (MiB ↓) |
 |--------------------|-----------:|--------:|-------:|
-| fpm                |       16.8 |      42 |     48 |
-| frankenphp-classic |       17.3 |      43 | **44** |
-| worker             |       18.2 |      27 |    108 |
-| prefork            |       18.1 |      26 |     59 |
-| frankenphp         |   **19.5** |  **23** |     51 |
+| PHP-FPM + nginx |       16.8 |      42 |     48 |
+| FrankenPHP classic |       17.3 |      43 | **44** |
+| WarmPHP worker + nginx |       18.2 |      27 |    108 |
+| WarmPHP prefork + nginx |       18.1 |      26 |     59 |
+| FrankenPHP worker |   **19.5** |  **23** |     51 |
 
 The fastest 7 steps and the least memory on every server; in journeys/s, CakePHP's API is level
 (19.7 against 19.5), with a faster login. The workers' lead over FPM, 15–19 ms in 7 steps, is consistent with avoiding the repeated boot.
@@ -243,13 +270,29 @@ Prefork is 3 ms behind FrankenPHP in those 7 steps: most of the difference in jo
 
 ### Symfony
 
-| Server             | API: journeys/s | 7 steps | memory | Full: journeys/s | 7 steps | memory |
-|--------------------|----------------:|--------:|-------:|-----------------:|--------:|-------:|
-| fpm                |             9.3 |      65 |     60 |              8.1 |     108 |     67 |
-| frankenphp-classic |             9.4 |      71 | **59** |              8.2 |     118 | **66** |
-| worker             |            10.1 |  **35** |    161 |              9.2 |      65 |    208 |
-| prefork            |            10.1 |  **35** |     85 |              9.2 |      65 |    118 |
-| frankenphp         |        **10.4** |      43 |     67 |          **9.8** |  **57** |     82 |
+OPcache on; four PHP workers. Memory is the end-of-run container reading, including nginx for
+PHP-FPM and WarmPHP. Lower times and memory are better; higher throughput is better.
+
+**API — OPcache on, four PHP workers.**
+
+| Server | Throughput (journeys/s ↑) | Post-login time (ms ↓) | Container memory (MiB ↓) |
+|---|---:|---:|---:|
+| PHP-FPM + nginx | 9.3 | 65 | 60 |
+| FrankenPHP classic | 9.4 | 71 | **59** |
+| WarmPHP worker + nginx | 10.1 | **35** | 161 |
+| WarmPHP prefork + nginx | 10.1 | **35** | 85 |
+| FrankenPHP worker | **10.4** | 43 | 67 |
+
+**Full-stack — OPcache on, four PHP workers.**
+
+| Server | Throughput (journeys/s ↑) | Post-login time (ms ↓) | Container memory (MiB ↓) |
+|---|---:|---:|---:|
+| PHP-FPM + nginx | 8.1 | 108 | 67 |
+| FrankenPHP classic | 8.2 | 118 | **66** |
+| WarmPHP worker + nginx | 9.2 | 65 | 208 |
+| WarmPHP prefork + nginx | 9.2 | 65 | 118 |
+| FrankenPHP worker | **9.8** | **57** | 82 |
+
 
 One of the clearest gains from staying booted: about half the time on any worker. Its low journeys/s come from
 bcrypt at cost 13, which hides this. FrankenPHP's 43 ms as an API is its `edit` step, which took 11,
@@ -258,27 +301,61 @@ Laravel: 449 ms in 7 steps, as an API.
 
 ### CakePHP
 
-| Server             | API: journeys/s | 7 steps | memory | Full: journeys/s | 7 steps | memory |
-|--------------------|----------------:|--------:|-------:|-----------------:|--------:|-------:|
-| fpm                |            17.1 |      53 |     56 |             13.9 |      96 |     61 |
-| frankenphp-classic |            17.8 |      52 | **51** |             14.2 |      98 | **56** |
-| worker             |            18.5 |      36 |    161 |             15.0 |      77 |    173 |
-| prefork            |            18.5 |      37 |     96 |             14.6 |      86 |    109 |
-| frankenphp         |        **19.7** |  **32** |     62 |         **16.4** |  **66** |     65 |
+OPcache on; four PHP workers. Memory is the end-of-run container reading, including nginx for
+PHP-FPM and WarmPHP. Lower times and memory are better; higher throughput is better.
 
-The best journeys/s, and the best full application. Here FrankenPHP is the clear pick over prefork:
-faster (12 % as a full application), and 34–44 MiB less. With Symfony, this is prefork's worst memory
+**API — OPcache on, four PHP workers.**
+
+| Server | Throughput (journeys/s ↑) | Post-login time (ms ↓) | Container memory (MiB ↓) |
+|---|---:|---:|---:|
+| PHP-FPM + nginx | 17.1 | 53 | 56 |
+| FrankenPHP classic | 17.8 | 52 | **51** |
+| WarmPHP worker + nginx | 18.5 | 36 | 161 |
+| WarmPHP prefork + nginx | 18.5 | 37 | 96 |
+| FrankenPHP worker | **19.7** | **32** | 62 |
+
+**Full-stack — OPcache on, four PHP workers.**
+
+| Server | Throughput (journeys/s ↑) | Post-login time (ms ↓) | Container memory (MiB ↓) |
+|---|---:|---:|---:|
+| PHP-FPM + nginx | 13.9 | 96 | 61 |
+| FrankenPHP classic | 14.2 | 98 | **56** |
+| WarmPHP worker + nginx | 15.0 | 77 | 173 |
+| WarmPHP prefork + nginx | 14.6 | 86 | 109 |
+| FrankenPHP worker | **16.4** | **66** | 65 |
+
+
+CakePHP has the highest observed API and full-stack throughput. FrankenPHP worker recorded
+12 % more full-stack journeys/s than WarmPHP prefork and used 34–44 MiB less container memory.
+The full-stack prefork row also had the widest throughput spread between rounds (11 %), so
+the size of that speed advantage needs a longer run to establish. With Symfony, this is prefork's worst memory
 result against FPM among the shared-application builds.
 
 ### CodeIgniter
 
-| Server             | API: journeys/s | 7 steps | memory | Full: journeys/s | 7 steps | memory |
-|--------------------|----------------:|--------:|-------:|-----------------:|--------:|-------:|
-| fpm                |            15.7 |      70 |     56 |              9.9 |     175 |     70 |
-| frankenphp-classic |            15.8 |      75 | **51** |              9.9 |     180 | **68** |
-| worker             |            16.2 |      63 |    127 |             11.0 |     141 |    149 |
-| prefork            |            16.3 |  **61** |     72 |         **11.3** | **136** |     89 |
-| frankenphp         |        **16.8** |      62 |     60 |         **11.3** |     140 |     79 |
+OPcache on; four PHP workers. Memory is the end-of-run container reading, including nginx for
+PHP-FPM and WarmPHP. Lower times and memory are better; higher throughput is better.
+
+**API — OPcache on, four PHP workers.**
+
+| Server | Throughput (journeys/s ↑) | Post-login time (ms ↓) | Container memory (MiB ↓) |
+|---|---:|---:|---:|
+| PHP-FPM + nginx | 15.7 | 70 | 56 |
+| FrankenPHP classic | 15.8 | 75 | **51** |
+| WarmPHP worker + nginx | 16.2 | 63 | 127 |
+| WarmPHP prefork + nginx | 16.3 | **61** | 72 |
+| FrankenPHP worker | **16.8** | 62 | 60 |
+
+**Full-stack — OPcache on, four PHP workers.**
+
+| Server | Throughput (journeys/s ↑) | Post-login time (ms ↓) | Container memory (MiB ↓) |
+|---|---:|---:|---:|
+| PHP-FPM + nginx | 9.9 | 175 | 70 |
+| FrankenPHP classic | 9.9 | 180 | **68** |
+| WarmPHP worker + nginx | 11.0 | 141 | 149 |
+| WarmPHP prefork + nginx | **11.3** | **136** | 89 |
+| FrankenPHP worker | **11.3** | 140 | 79 |
+
 
 The smallest gain, and all the workers are tied. Most of its work happens on every request, and it
 runs in `development`, as configured, with the debug toolbar writing a file per request. FPM with
@@ -286,19 +363,38 @@ OPcache is a sound choice here, unless the application is on `production` and me
 
 ### Laravel
 
+OPcache on; four PHP workers. Memory is the end-of-run container reading, including nginx for
+PHP-FPM and WarmPHP. Lower times and memory are better; higher throughput is better.
+
 Three ways to run it. FPM is the reference, "new app" builds an application per request, and "shared"
 keeps one, with the resets of [`compat/laravel-shared.php`](https://github.com/byjg/warmphp/blob/master/compat/laravel-shared.php).
 
-| Server              | API: journeys/s | 7 steps | memory | Full: journeys/s | 7 steps | memory |
-|---------------------|----------------:|--------:|-------:|-----------------:|--------:|-------:|
-| fpm                 |            13.2 |      87 |     73 |              5.6 |     270 |     99 |
-| frankenphp-classic  |            13.6 |      87 | **71** |              5.6 |     279 | **96** |
-| new app: worker     |            10.6 |     137 |    146 |              4.7 |     360 |    244 |
-| new app: prefork    |            12.9 |      94 |    104 |              5.4 |     294 |    182 |
-| new app: frankenphp |            14.2 |      78 |    108 |              5.8 |     259 |    206 |
-| shared: worker      |            15.6 |      47 |    221 |              6.1 |     226 |    259 |
-| shared: prefork     |            15.7 |      46 |    107 |              6.1 |     220 |    137 |
-| shared: frankenphp  |        **16.7** |  **42** |    102 |          **6.3** | **217** |    134 |
+**API — OPcache on, four PHP workers.**
+
+| Server | Throughput (journeys/s ↑) | Post-login time (ms ↓) | Container memory (MiB ↓) |
+|---|---:|---:|---:|
+| PHP-FPM + nginx | 13.2 | 87 | 73 |
+| FrankenPHP classic | 13.6 | 87 | **71** |
+| new app: WarmPHP worker + nginx | 10.6 | 137 | 146 |
+| new app: WarmPHP prefork + nginx | 12.9 | 94 | 104 |
+| new app: FrankenPHP worker | 14.2 | 78 | 108 |
+| shared: WarmPHP worker + nginx | 15.6 | 47 | 221 |
+| shared: WarmPHP prefork + nginx | 15.7 | 46 | 107 |
+| shared: FrankenPHP worker | **16.7** | **42** | 102 |
+
+**Full-stack — OPcache on, four PHP workers.**
+
+| Server | Throughput (journeys/s ↑) | Post-login time (ms ↓) | Container memory (MiB ↓) |
+|---|---:|---:|---:|
+| PHP-FPM + nginx | 5.6 | 270 | 99 |
+| FrankenPHP classic | 5.6 | 279 | **96** |
+| new app: WarmPHP worker + nginx | 4.7 | 360 | 244 |
+| new app: WarmPHP prefork + nginx | 5.4 | 294 | 182 |
+| new app: FrankenPHP worker | 5.8 | 259 | 206 |
+| shared: WarmPHP worker + nginx | 6.1 | 226 | 259 |
+| shared: WarmPHP prefork + nginx | 6.1 | 220 | 137 |
+| shared: FrankenPHP worker | **6.3** | **217** | 134 |
+
 
 - **A new application per request gains little**: at best 8 % over FPM's journeys/s, with more memory,
   and the plain worker is slower than FPM.
@@ -316,10 +412,10 @@ keeps one, with the resets of [`compat/laravel-shared.php`](https://github.com/b
 Once booted, a worker has already compiled its code, so OPcache changes little with a shared
 application: within 6 % in journeys/s, and mostly within 2 %. The exception is rebuilding the
 application per request, as `compat/laravel-fresh.php` does, where it costs 9 to 14 % of the
-journeys/s on prefork and FrankenPHP. FPM and FrankenPHP classic, which boot on every request, lose
-×1.6 to ×3.2 of their journeys/s without it.
+journeys/s on prefork and FrankenPHP. FPM and FrankenPHP classic, which boot on every request, retain
+about 31–63 % of their OPcache-on throughput when it is disabled.
 
-| Group                                | Journeys/s, OPcache on → off                                                                   |
+| Group                                | Throughput (journeys/s ↑), OPcache on → off                                                                   |
 |--------------------------------------|------------------------------------------------------------------------------------------------|
 | APIs and Gluo, shared application    | Within 2 % on every worker                                                                     |
 | Full-stack, shared application       | Within 2 %, except CodeIgniter on prefork and FrankenPHP (11.3 → 10.7, −6 %; 11.3 → 10.9, −4 %) |
@@ -337,7 +433,10 @@ and prefork carry nginx in their figure, and FrankenPHP does not. `worker_proces
 starts 22 processes on this machine, 18.6 MiB; on a 4-core server it would be 6.3 MiB. An estimate,
 subtracting the difference from the measured figures, as nginx was measured idle:
 
-| Build                      | fpm | frankenphp-classic | worker | prefork | frankenphp |
+**Estimated container memory (MiB; lower is better), OPcache on, four PHP workers.**
+These are adjusted estimates for four nginx processes, not measurements on a four-core machine.
+
+| Build                      | PHP-FPM + nginx | FrankenPHP classic | WarmPHP worker + nginx | WarmPHP prefork + nginx | FrankenPHP worker |
 |----------------------------|----:|-------------------:|-------:|--------:|-----------:|
 | Gluo                       |  35 |                 44 |     96 |      46 |         51 |
 | Symfony API                |  48 |                 59 |    149 |      73 |         67 |

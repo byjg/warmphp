@@ -8,7 +8,9 @@ sidebar_label: "Getting started"
 WarmPHP keeps your PHP application booted in memory and serves HTTP with it, using the
 plain PHP CLI. You put it behind your usual web server, as you would PHP-FPM.
 
-You need Go to build it, and a PHP 8.1 or newer CLI to run it, from your distribution or any image.
+You need a PHP 8.1 or newer CLI to run it, from your distribution or any image.
+Install WarmPHP from the [ByJG package repository](https://opensource.byjg.com/docs/packages),
+use Homebrew, or build from source as described below. Only the source build needs Go installed manually.
 The binary carries its PHP files, so it runs from any folder, on its own.
 
 ## Install PHP
@@ -65,7 +67,37 @@ Then run PHP through it, as in [PHP in Docker](#7-php-in-docker). Tested with PH
 
 `make test` runs on `byjg/php:8.5-fpm-nginx` by default, and the benchmark uses it. Tested with PHP 8.5.12.
 
-## 1. Build
+## 1. Install or build
+
+### Install from ByJG packages
+
+For Debian/Ubuntu or Fedora/RHEL, first follow the
+[ByJG repository setup instructions](https://opensource.byjg.com/docs/packages#setup)
+for your distribution. Then install WarmPHP:
+
+```bash
+# Debian/Ubuntu, after adding the ByJG APT repository
+sudo apt install warmphp
+
+# Fedora/RHEL, after adding the ByJG RPM repository
+sudo dnf install warmphp
+```
+
+For macOS or Linux with Homebrew:
+
+```bash
+brew install byjg/tap/warmphp
+```
+
+Homebrew installs Go as a build dependency automatically. For Alpine packages, see
+[the README's Alpine instructions](https://github.com/byjg/warmphp#alpine).
+
+After package or Homebrew installation, run `warmphp` from your PATH instead of `./warmphp`.
+You can run your own application directly; the example below uses files from a source checkout.
+
+### Build from source
+
+From a source checkout, with Go installed:
 
 ```bash
 make build
@@ -173,7 +205,7 @@ up from the entry), skips `vendor/` and the folders frameworks write to (`var/`,
 says `reloaded: every worker runs the new code` once the new code is up. Details:
 [Development: `-watch`](https://github.com/byjg/warmphp#development--watch).
 
-## 4. The one change in your code
+## 4. Reading request bodies
 
 `php://input` is empty, because PHP runs as a CLI. Read the raw request body with
 `PhpWorker::input()` instead:
@@ -182,8 +214,11 @@ says `reloaded: every worker runs the new code` once the new code is up. Details
 $data = json_decode(PhpWorker::input(), true);
 ```
 
-Everything else works as usual: `$_GET`, `$_POST`, `$_FILES`, `$_COOKIE`, `header()`,
-`setcookie()`, `http_response_code()`, sessions, `echo`.
+The worker provides `$_GET`, `$_POST`, `$_FILES`, `$_COOKIE`, response headers, cookies, sessions
+and output. See the [supported behavior and limitations](https://github.com/byjg/warmphp#what-the-worker-provides-on-each-request).
+Framework boot files handle request-body adaptation for the supported frameworks. Your application
+must also reset request-specific state and, with prefork, open connections lazily; see
+[What to watch for](#what-to-watch-for).
 
 ## 5. Put nginx in front
 
@@ -217,16 +252,19 @@ With Caddy it is one line: `reverse_proxy localhost:8080`.
 
 ## 6. Production settings
 
+These values are starting points, not measured capacity limits. More workers can increase memory
+use and database connections; choose worker and recycling counts for your application.
+
 ```bash
 ./warmphp -listen 127.0.0.1:8080 -workers 4 -mode prefork -max-requests 1000 -timeout 30s app.php
 ```
 
 | Flag                 | What it is for                                                                                  |
 |----------------------|-------------------------------------------------------------------------------------------------|
-| `-workers 4`         | How many requests PHP serves at the same time; about one per CPU core                           |
+| `-workers 4`         | Up to four requests in PHP at once; one per CPU core is a starting point, then measure your workload                           |
 | `-mode prefork`      | Boots once and forks the workers: they share OPcache and memory, so they use much less of it    |
 | `-max-requests 1000` | Replaces a worker after that many requests, in case your application leaks memory              |
-| `-timeout 30s`       | A request that takes longer gets a 504, and its worker is replaced                              |
+| `-timeout 30s`       | Up to 30 seconds to wait for a worker and process the request; timeout returns 504 and an active timed-out worker is replaced                              |
 
 Turn OPcache on for the CLI (`opcache.enable_cli=1`, in `php.ini` or with `-php "php -d opcache.enable_cli=1"`).
 
