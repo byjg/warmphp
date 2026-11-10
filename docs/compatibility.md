@@ -1,18 +1,23 @@
+---
+sidebar_position: 2
+sidebar_label: "Frameworks"
+---
+
 # Running existing frameworks
 
 The builds of [gluo-framework-comparison](https://github.com/byjg/gluo-framework-comparison)
 (commit `0f1c36f`) were run behind the gateway **without changing a file in them**. Everything
-framework-specific lives in a boot file in [`compat/`](../compat), the same role Laravel Octane,
+framework-specific lives in a boot file in [`compat/`](https://github.com/byjg/warmphp/tree/master/compat), the same role Laravel Octane,
 RoadRunner or FrankenPHP adapters play.
 
 | Build              | Version                         | Boot file                                                                                  |
 |--------------------|---------------------------------|--------------------------------------------------------------------------------------------|
-| `symfony-official` | Symfony 8.1.8                   | [`compat/symfony.php`](../compat/symfony.php)                                              |
-| `cakephp`          | CakePHP 5.4.3                   | [`compat/cakephp.php`](../compat/cakephp.php)                                              |
-| `codeigniter`      | CodeIgniter 4.7.5               | [`compat/codeigniter.php`](../compat/codeigniter.php)                                      |
-| `laravel`          | Laravel 13.35, Inertia 3.5      | [`compat/laravel-fresh.php`](../compat/laravel-fresh.php), [`compat/laravel-shared.php`](../compat/laravel-shared.php) |
-| `gluo`             | Gluo 7.0, RestServer 7.0 (JSON API) | [`compat/gluo.php`](../compat/gluo.php)                                                |
-| the byjg/gluo starter | Gluo 7.0 (`ByJG\Gluo\Http\Application`) | [`compat/gluo.php`](../compat/gluo.php)                                              |
+| `symfony-official` | Symfony 8.1.8                   | [`compat/symfony.php`](https://github.com/byjg/warmphp/blob/master/compat/symfony.php)                                              |
+| `cakephp`          | CakePHP 5.4.3                   | [`compat/cakephp.php`](https://github.com/byjg/warmphp/blob/master/compat/cakephp.php)                                              |
+| `codeigniter`      | CodeIgniter 4.7.5               | [`compat/codeigniter.php`](https://github.com/byjg/warmphp/blob/master/compat/codeigniter.php)                                      |
+| `laravel`          | Laravel 13.35, Inertia 3.5      | [`compat/laravel-fresh.php`](https://github.com/byjg/warmphp/blob/master/compat/laravel-fresh.php), [`compat/laravel-shared.php`](https://github.com/byjg/warmphp/blob/master/compat/laravel-shared.php) |
+| `gluo`             | Gluo 7.0, RestServer 7.0 (JSON API) | [`compat/gluo.php`](https://github.com/byjg/warmphp/blob/master/compat/gluo.php)                                                |
+| the byjg/gluo starter | Gluo 7.0 (`ByJG\Gluo\Http\Application`) | [`compat/gluo.php`](https://github.com/byjg/warmphp/blob/master/compat/gluo.php)                                              |
 
 Not tested: `symfony/` (the FrankenPHP template, same application as `symfony-official`).
 
@@ -31,7 +36,7 @@ CodeIgniter runs in `development`, as the project is configured, with its debug 
 
 ## Results
 
-[`compat_test.go`](../compat_test.go) drives each build over HTTP with one worker, so every request
+[`compat_test.go`](https://github.com/byjg/warmphp/blob/master/compat_test.go) drives each build over HTTP with one worker, so every request
 goes through the same PHP process: anonymous access redirected to login, wrong password, login,
 list, **an anonymous client right after an admin request** (the leak check), create, edit,
 soft delete, logout. Gluo's scenario is the same over its JSON API, with a JWT.
@@ -83,10 +88,10 @@ Each framework has an official way to give the request its body:
 
 | Framework           | How the boot file passes `PhpWorker::input()`                                          |
 |---------------------|----------------------------------------------------------------------------------------|
-| Symfony and Laravel | `Request::setFactory()`, so `Request::createFromGlobals()` and `Request::capture()` keep working ([`compat/request-body.php`](../compat/request-body.php)) |
+| Symfony and Laravel | `Request::setFactory()`, so `Request::createFromGlobals()` and `Request::capture()` keep working ([`compat/request-body.php`](https://github.com/byjg/warmphp/blob/master/compat/request-body.php)) |
 | CakePHP             | `ServerRequestFactory::fromGlobals(['CAKEPHP_INPUT' => …])`                             |
 | CodeIgniter         | a `pre_system` listener: `service('request')->setBody(PhpWorker::input())`. `run()` creates the request from `php://input` and fires `pre_system` right after, before any filter or controller reads it. The full-stack build only posts forms (`$_POST`); the API build reads JSON with `getJSON()`, which needs it |
-| Gluo (RestServer)   | none: `HttpRequest::payload()` reads `php://input` itself, and Gluo's `Server` comes from its DI config. RestServer now has `Server::withRequestObject()`, which handles a PSR-7 request (byjg/webrequest's `ServerRequest`, with the worker's globals and body, built by [`compat/psr7-request.php`](../compat/psr7-request.php)) through the new `Psr7RequestAdapter::toHttpRequest()`, and gluo-core's `Application::handle()` passes it on |
+| Gluo (RestServer)   | none: `HttpRequest::payload()` reads `php://input` itself, and Gluo's `Server` comes from its DI config. RestServer now has `Server::withRequestObject()`, which handles a PSR-7 request (byjg/webrequest's `ServerRequest`, with the worker's globals and body, built by [`compat/psr7-request.php`](https://github.com/byjg/warmphp/blob/master/compat/psr7-request.php)) through the new `Psr7RequestAdapter::toHttpRequest()`, and gluo-core's `Application::handle()` passes it on |
 
 Laravel's Inertia screens post JSON, so the Laravel test proves this path. The API builds of
 `frameworks/api/` all post JSON, so the benchmark's api suite proves it for every framework.
@@ -157,7 +162,7 @@ Leaks found:
 - **CakePHP, bootstrap.** `Server::run()` calls `bootstrap()` every time (`Plugin named DebugKit is
   already loaded`). The boot file runs the middleware itself and bootstraps once.
 - **Laravel, one shared app.** Laravel's singletons assume one request per process. Kept across
-  requests, three things break, and [`compat/laravel-shared.php`](../compat/laravel-shared.php)
+  requests, three things break, and [`compat/laravel-shared.php`](https://github.com/byjg/warmphp/blob/master/compat/laravel-shared.php)
   resets them before every request, as Octane's listeners do:
 
   | State kept                                                                                             | What it caused                                                                                                  | Reset (Octane's listener)                                  |

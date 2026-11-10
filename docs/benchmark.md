@@ -1,3 +1,8 @@
+---
+sidebar_position: 3
+sidebar_label: "Benchmark"
+---
+
 # Benchmark: PHP-FPM, WarmPHP and FrankenPHP
 
 The same user journey, run on the builds of
@@ -23,11 +28,11 @@ The conclusions, per server and per framework, are in [analysis.md](analysis.md)
 
 | Build                              | Framework                                       | How it runs in the worker                                                                                                                                       |
 |------------------------------------|-------------------------------------------------|-----------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| `frameworks/fullstack/symfony-official` | Symfony 8.1, Doctrine, Twig, form login    | [`compat/symfony.php`](../compat/symfony.php): one kernel                                                                                                       |
-| `frameworks/fullstack/cakephp`     | CakePHP 5.4, Authentication plugin              | [`compat/cakephp.php`](../compat/cakephp.php): one application, a new DI container per request                                                                  |
-| `frameworks/fullstack/codeigniter` | CodeIgniter 4.7, Shield                         | [`compat/codeigniter.php`](../compat/codeigniter.php): its own worker mode                                                                                      |
-| `frameworks/fullstack/laravel`     | Laravel 13, Inertia (React), Fortify            | [`compat/laravel-fresh.php`](../compat/laravel-fresh.php): a new application per request; [`compat/laravel-shared.php`](../compat/laravel-shared.php): one application |
-| `frameworks/gluo`                  | Gluo 7.0, JSON API with JWT, React SPA          | [`compat/gluo.php`](../compat/gluo.php): one `ByJG\Gluo\Http\Application`                                                                                       |
+| `frameworks/fullstack/symfony-official` | Symfony 8.1, Doctrine, Twig, form login    | [`compat/symfony.php`](https://github.com/byjg/warmphp/blob/master/compat/symfony.php): one kernel                                                                                                       |
+| `frameworks/fullstack/cakephp`     | CakePHP 5.4, Authentication plugin              | [`compat/cakephp.php`](https://github.com/byjg/warmphp/blob/master/compat/cakephp.php): one application, a new DI container per request                                                                  |
+| `frameworks/fullstack/codeigniter` | CodeIgniter 4.7, Shield                         | [`compat/codeigniter.php`](https://github.com/byjg/warmphp/blob/master/compat/codeigniter.php): its own worker mode                                                                                      |
+| `frameworks/fullstack/laravel`     | Laravel 13, Inertia (React), Fortify            | [`compat/laravel-fresh.php`](https://github.com/byjg/warmphp/blob/master/compat/laravel-fresh.php): a new application per request; [`compat/laravel-shared.php`](https://github.com/byjg/warmphp/blob/master/compat/laravel-shared.php): one application |
+| `frameworks/gluo`                  | Gluo 7.0, JSON API with JWT, React SPA          | [`compat/gluo.php`](https://github.com/byjg/warmphp/blob/master/compat/gluo.php): one `ByJG\Gluo\Http\Application`                                                                                       |
 | `frameworks/api/symfony`           | Symfony 8.1, Doctrine, lexik JWT                | `compat/symfony.php`                                                                                                                                            |
 | `frameworks/api/cakephp`           | CakePHP 5.4, Authentication plugin (Jwt)        | `compat/cakephp.php`                                                                                                                                            |
 | `frameworks/api/codeigniter`       | CodeIgniter 4.7, Shield JWT                     | `compat/codeigniter.php`                                                                                                                                        |
@@ -115,10 +120,10 @@ and here nginx and PHP run as the user that owns the projects (they write their 
 host network (the databases are on `127.0.0.1`). So the benchmark writes the FPM pool and the nginx
 configuration itself, with their temporary files in a folder of its own.
 
-**frankenphp** runs in its own image, [`benchmark/frankenphp/Dockerfile`](../benchmark/frankenphp/Dockerfile):
+**frankenphp** runs in its own image, [`benchmark/frankenphp/Dockerfile`](https://github.com/byjg/warmphp/blob/master/benchmark/frankenphp/Dockerfile):
 `dunglas/frankenphp:1-php8.5` (Debian, PHP 8.5.11 ZTS) with the extensions the projects need, and a
 Caddyfile of its own: 4 PHP threads, no admin API, no HTTPS, no compression. Caddy also serves the
-static files, so nginx is not there. Its worker script is [`compat/frankenphp.php`](../compat/frankenphp.php),
+static files, so nginx is not there. Its worker script is [`compat/frankenphp.php`](https://github.com/byjg/warmphp/blob/master/compat/frankenphp.php),
 which runs the same boot files of `compat/`, with 4 workers.
 
 **frankenphp-classic** is the same image and Caddyfile without the worker: `php_server` with the
@@ -178,7 +183,7 @@ took 1.1 to 1.9 % longer, within the difference between rounds.
 
 100 journeys per run, one build at a time, with only that build's database up: 102 runs, 3 rounds
 each, 30,600 journeys, **none failed the checks**. Each row is the round with the median journeys/s; the
-`spread` column of [`benchmark/results.tsv`](../benchmark/results.tsv) is the difference between the rounds:
+`spread` column of [`benchmark/results.tsv`](https://github.com/byjg/warmphp/blob/master/benchmark/results.tsv) is the difference between the rounds:
 at most 11 %, and 1 % at the median, so treat a difference under about 5 % as too close to call; three short rounds are not a significance test. Each round is also in `benchmark/results-round<n>.tsv`.
 Intel Core Ultra 9 185H (22 CPUs), 30 GB, Docker, every build on MySQL 8.4. All Docker containers
 were removed before the first round, and the machine-wide `cpu` column reads 16 to 19 % in every
@@ -288,7 +293,7 @@ Prefork and FrankenPHP, in ms. "page" is the login page, `list1` and `list2` are
 | Laravel full-stack, shared | prefork    | 14.6 |    417 |  30.1 |  30.1 | 9.2 | 44.4 | 44.6 |     220 |
 |                            | frankenphp | 13.3 |    404 |  29.8 |  30.0 | 8.2 | 43.0 | 43.5 |     217 |
 
-Every step of every run, with p50, p99 and the CPU, is in [`benchmark/results.tsv`](../benchmark/results.tsv).
+Every step of every run, with p50, p99 and the CPU, is in [`benchmark/results.tsv`](https://github.com/byjg/warmphp/blob/master/benchmark/results.tsv).
 With 100 journeys, its `p99` is the slowest journey.
 
 ## Screenshots
@@ -306,11 +311,11 @@ Laravel's are the React starter kit's. The screenshots use the benchmark's setti
 
 | Build              | Login                                                             | Products                                                                |
 |--------------------|-------------------------------------------------------------------|-------------------------------------------------------------------------|
-| Symfony            | [login](../benchmark/screenshots/fullstack-symfony-login.jpg)     | [products](../benchmark/screenshots/fullstack-symfony-products.jpg)     |
-| CakePHP            | [login](../benchmark/screenshots/fullstack-cakephp-login.jpg)     | [products](../benchmark/screenshots/fullstack-cakephp-products.jpg)     |
-| CodeIgniter        | [login](../benchmark/screenshots/fullstack-codeigniter-login.jpg) | [products](../benchmark/screenshots/fullstack-codeigniter-products.jpg) |
-| Laravel            | [login](../benchmark/screenshots/fullstack-laravel-login.jpg)     | [products](../benchmark/screenshots/fullstack-laravel-products.jpg)     |
-| Gluo               | [login](../benchmark/screenshots/gluo-login.jpg)                  | [products](../benchmark/screenshots/gluo-products.jpg)                  |
+| Symfony            | [login](https://github.com/byjg/warmphp/blob/master/benchmark/screenshots/fullstack-symfony-login.jpg)     | [products](https://github.com/byjg/warmphp/blob/master/benchmark/screenshots/fullstack-symfony-products.jpg)     |
+| CakePHP            | [login](https://github.com/byjg/warmphp/blob/master/benchmark/screenshots/fullstack-cakephp-login.jpg)     | [products](https://github.com/byjg/warmphp/blob/master/benchmark/screenshots/fullstack-cakephp-products.jpg)     |
+| CodeIgniter        | [login](https://github.com/byjg/warmphp/blob/master/benchmark/screenshots/fullstack-codeigniter-login.jpg) | [products](https://github.com/byjg/warmphp/blob/master/benchmark/screenshots/fullstack-codeigniter-products.jpg) |
+| Laravel            | [login](https://github.com/byjg/warmphp/blob/master/benchmark/screenshots/fullstack-laravel-login.jpg)     | [products](https://github.com/byjg/warmphp/blob/master/benchmark/screenshots/fullstack-laravel-products.jpg)     |
+| Gluo               | [login](https://github.com/byjg/warmphp/blob/master/benchmark/screenshots/gluo-login.jpg)                  | [products](https://github.com/byjg/warmphp/blob/master/benchmark/screenshots/gluo-products.jpg)                  |
 
 ## Reproducing
 

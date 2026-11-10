@@ -1,0 +1,54 @@
+version: 2
+
+builds:
+  - id: warmphp
+    main: .
+    binary: warmphp
+    # Static, no cgo: the same binary runs on any Linux, Alpine (musl) included
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - darwin
+    goarch:
+      - amd64
+      - arm64
+    ldflags:
+      - -s -w -X main.buildVersion={{.Version}}
+
+archives:
+  - id: warmphp-archive
+    name_template: "warmphp_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    formats:
+      - tar.gz
+
+nfpms:
+  - id: warmphp-pkg
+    package_name: warmphp
+    ids:
+      - warmphp
+    vendor: ByJG
+    homepage: https://github.com/byjg/warmphp
+    maintainer: ByJG <opensource@byjg.com>
+    description: Turns your PHP CLI into a web application server, with persistent workers
+    license: MIT
+    # The PHP CLI is not a dependency: it may be in a container (-php "docker run ... php"), and each
+    # distribution names its package differently
+    contents:
+      - src: LICENSE
+        dst: /usr/share/doc/warmphp/copyright
+    formats:
+      - deb
+      - rpm
+      - apk
+
+checksum:
+  name_template: "checksums.txt"
+
+changelog:
+  use: github-native
+
+release:
+  github:
+    owner: byjg
+    name: warmphp

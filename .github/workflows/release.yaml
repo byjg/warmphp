@@ -1,0 +1,48 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: false
+
+      # Linux and macOS, amd64 and arm64: the archives, and .deb, .rpm and .apk
+      # packages for Linux
+      - name: Run GoReleaser
+        uses: goreleaser/goreleaser-action@v7
+        with:
+          version: latest
+          args: release --clean
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # The .deb and .rpm go to the ByJG APT and RPM repositories. The .apk stays a
+  # release asset: there is no Alpine repository to publish it to.
+  publish-packages:
+    needs: release
+    uses: byjg/byjg.github.io/.github/workflows/add-pkg.yaml@master
+    with:
+      org: byjg
+      repo: warmphp
+      tag: ${{ github.ref_name }}
+    secrets:
+      DOC_TOKEN: ${{ secrets.DOC_TOKEN }}
+      GPG_PRIVATE_KEY: ${{ secrets.GPG_PRIVATE_KEY }}
+      R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+      R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+      R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}

@@ -7,3 +7,6 @@ examples/restserver/vendor/
 examples/restserver/composer.lock
 
 .idea/
+
+# GoReleaser output
+dist/

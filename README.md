@@ -1,5 +1,12 @@
 # WarmPHP
 
+[![Build Status](https://github.com/byjg/warmphp/actions/workflows/build.yml/badge.svg?branch=master)](https://github.com/byjg/warmphp/actions/workflows/build.yml)
+[![Opensource ByJG](https://img.shields.io/badge/opensource-byjg-success.svg)](http://opensource.byjg.com)
+[![Install MCP Server](https://img.shields.io/badge/Install-MCP_Server-8A2BE2?logo=modelcontextprotocol&logoColor=white)](https://opensource.byjg.com/docs/ai/mcpserver-byjg-docs/)
+[![GitHub source](https://img.shields.io/badge/Github-source-informational?logo=github)](https://github.com/byjg/warmphp/)
+[![GitHub license](https://img.shields.io/github/license/byjg/warmphp.svg)](https://opensource.byjg.com/license/)
+[![GitHub release](https://img.shields.io/github/release/byjg/warmphp.svg)](https://github.com/byjg/warmphp/releases/)
+
 **WarmPHP turns your PHP CLI into a web application server.**
 
 A pool of persistent workers, structured JSON logs and automatic worker recovery, all using your
@@ -37,6 +44,56 @@ The gateway's tests pass with:
 | `byjg/php:8.5-cli`, `byjg/php:8.5-fpm-nginx` | 8.5.12 | nothing more; turn Xdebug off with `-d xdebug.mode=off` |
 
 How to install each one: [Install PHP](docs/getting-started.md#install-php).
+
+## Install
+
+One static binary, for Linux and macOS, on amd64 and arm64. It needs no PHP to install: it runs the
+PHP CLI you point it to.
+
+### deb/rpm
+
+Add the [ByJG package repository](https://opensource.byjg.com/docs/packages), then:
+
+```bash
+# Debian/Ubuntu
+apt install warmphp
+
+# Fedora/RHEL
+dnf install warmphp
+```
+
+### Alpine
+
+Each release has an `.apk` for amd64 and arm64. Download the latest one for this machine and install it:
+
+```bash
+VERSION=$(wget -qO- https://api.github.com/repos/byjg/warmphp/releases/latest | sed -n 's/.*"tag_name": *"v\([^"]*\)".*/\1/p')
+ARCH=$(uname -m | sed 's/x86_64/amd64/; s/aarch64/arm64/')
+wget "https://github.com/byjg/warmphp/releases/download/v${VERSION}/warmphp_${VERSION}_linux_${ARCH}.apk"
+apk add --allow-untrusted "warmphp_${VERSION}_linux_${ARCH}.apk"
+```
+
+The package is not signed, hence `--allow-untrusted`, and is not in a repository: run the same command again for a new version ([Package Repository](https://opensource.byjg.com/docs/packages#install-a-package), Alpine tab). Alpine splits PHP into small packages: install
+`php84-session` (and the extensions your application needs) beside `php84`.
+
+### Homebrew
+
+On macOS (or Linux) with [Homebrew](https://brew.sh):
+
+```bash
+brew install byjg/tap/warmphp
+```
+
+Homebrew builds it from source, installing Go only for the build.
+
+### From source
+
+```bash
+make build      # ./warmphp
+```
+
+Any other platform Go supports: `make build GOOS=darwin GOARCH=arm64`. `warmphp -version` says which
+version you have.
 
 ## Quick start
 
@@ -91,7 +148,7 @@ return static fn() => $app->handle();  // every request
 
 | Situation                                                                 | Use                                   | Why                                                                  |
 |---------------------------------------------------------------------------|---------------------------------------|----------------------------------------------------------------------|
-| A framework of [`compat/`](compat) (`-framework`), or an entry that returns a callable | `-mode worker`                 | The default: boots once per worker, no `pcntl` needed                |
+| A framework of [`compat/`](https://github.com/byjg/warmphp/tree/master/compat) (`-framework`), or an entry that returns a callable | `-mode worker`                 | The default: boots once per worker, no `pcntl` needed                |
 | The same in production, when memory counts or there are many workers      | `-mode prefork`                       | One boot, shared OPcache and memory (Gluo, 4 workers: 59 MiB against 108) |
 | A PHP without `pcntl` and `posix` (Docker's `php:*-cli`, Fedora without `php-process`) | `-mode worker`             | `prefork` needs them                                                 |
 | Development, editing the code                                             | `-mode worker -watch` (or `legacy -watch`) | The next request after a save runs the new code; not with `prefork` |
@@ -127,7 +184,7 @@ So, in a front controller run with `-mode legacy`:
   lists what each framework's `public/index.php` does in `-mode legacy`; the frameworks there run in
   `-mode worker` through their boot files instead.
 
-[`examples/legacy`](examples/legacy) is a front controller written for it:
+[`examples/legacy`](https://github.com/byjg/warmphp/tree/master/examples/legacy) is a front controller written for it:
 
 ```bash
 ./warmphp -mode legacy examples/legacy/index.php
@@ -185,7 +242,7 @@ order, and the worker is replaced after that response.
 
 The CLI SAPI drops response headers. PHP 8 allows redeclaring a function listed in
 `disable_functions`, so the gateway starts every worker with these functions disabled (merged
-with `php.ini`'s own list) and [`php/functions.php`](php/functions.php) redefines them in plain PHP:
+with `php.ini`'s own list) and [`php/functions.php`](https://github.com/byjg/warmphp/blob/master/php/functions.php) redefines them in plain PHP:
 
 | Function                                                           | Behaviour in the worker                                                                                    |
 |--------------------------------------------------------------------|------------------------------------------------------------------------------------------------------------|
@@ -217,7 +274,7 @@ or in objects built at boot.
 ## ByJG RestServer
 
 RestServer (7.0) runs with its default `HttpWriter`, cookies included.
-[`examples/restserver/app.php`](examples/restserver/app.php) hands each request to a new `Server`
+[`examples/restserver/app.php`](https://github.com/byjg/warmphp/blob/master/examples/restserver/app.php) hands each request to a new `Server`
 with `Server::withRequestObject()`: a PSR-7 request built from the worker's globals and
 `PhpWorker::input()`:
 
@@ -230,7 +287,7 @@ curl 'localhost:8080/hello?name=joao'
 ## Existing frameworks
 
 Symfony, CakePHP, Laravel, CodeIgniter and Gluo (7.0, through gluo-core's `Application`) were tested without changing them, through the boot files in
-[`compat/`](compat), which the binary carries:
+[`compat/`](https://github.com/byjg/warmphp/tree/master/compat), which the binary carries:
 
 ```bash
 ./warmphp -framework symfony -project-root /path/to/my-symfony-app
@@ -268,6 +325,7 @@ and the best choice for each framework.
 | `-boot-timeout`  | `30s`            | Maximum time for a worker to boot                                    |
 | `-max-body`      | `32MiB`          | Maximum request body (413 above it)                                  |
 | `-upload-dir`    | system temp dir  | Where uploaded files and the embedded PHP files are written; PHP must see the same path |
+| `-version`       |                  | Prints the version and exits                                         |
 
 Running PHP in Docker works too. Use `--init`, so PHP is not PID 1 and stops on SIGTERM, and use `-i`
 for stdin:
@@ -481,3 +539,6 @@ make test WARMPHP_PHP="php"   # PHP installed on the machine
 
 The tests also run the [RestServer example](#byjg-restserver): `make test` installs its dependencies
 with `WARMPHP_COMPOSER` the first run, and again when its `composer.json` changes.
+
+----
+[Open source ByJG](http://opensource.byjg.com)

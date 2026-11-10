@@ -1,3 +1,8 @@
+---
+sidebar_position: 4
+sidebar_label: "Analysis"
+---
+
 # Analysis: which server, for which framework
 
 What the [benchmark](benchmark.md) shows: the CRUD journey on 5 frameworks, as APIs and as full
@@ -282,7 +287,7 @@ OPcache is a sound choice here, unless the application is on `production` and me
 ### Laravel
 
 Three ways to run it. FPM is the reference, "new app" builds an application per request, and "shared"
-keeps one, with the resets of [`compat/laravel-shared.php`](../compat/laravel-shared.php).
+keeps one, with the resets of [`compat/laravel-shared.php`](https://github.com/byjg/warmphp/blob/master/compat/laravel-shared.php).
 
 | Server              | API: journeys/s | 7 steps | memory | Full: journeys/s | 7 steps | memory |
 |---------------------|----------------:|--------:|-------:|-----------------:|--------:|-------:|

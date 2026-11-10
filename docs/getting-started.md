@@ -1,3 +1,8 @@
+---
+sidebar_position: 1
+sidebar_label: "Getting started"
+---
+
 # Getting started
 
 WarmPHP keeps your PHP application booted in memory and serves HTTP with it, using the
@@ -106,18 +111,18 @@ An **old-style `index.php`** that does everything at the top level can run as it
 `-mode legacy`. It is included again on every request, but the worker process stays: the classes,
 functions and `require_once` files it loaded stay loaded, and an edit to them is not seen until the
 worker is replaced. It gains less than `-mode worker`; read the rules in
-[`-mode legacy`](../README.md#-mode-legacy-a-front-controller-in-a-persistent-process) first:
+[`-mode legacy`](https://github.com/byjg/warmphp#-mode-legacy-a-front-controller-in-a-persistent-process) first:
 
 ```bash
 ./warmphp -mode legacy public/index.php
 ```
 
-Which mode for which case: [When to use each mode](../README.md#when-to-use-each-mode).
+Which mode for which case: [When to use each mode](https://github.com/byjg/warmphp#when-to-use-each-mode).
 
 ### 3.2 Existing frameworks
 
 A framework's own `index.php` boots it on every request, and most break when it is included twice.
-The binary has an entry for each framework instead, from [`compat/`](../compat): it boots the
+The binary has an entry for each framework instead, from [`compat/`](https://github.com/byjg/warmphp/tree/master/compat): it boots the
 framework once and handles each request the way the framework's own worker runtime does. Your
 application is not changed; `-framework` picks the entry and `-project-root` says where your
 application is:
@@ -166,7 +171,7 @@ It watches the application's folder (`-project-root`, or the nearest folder with
 up from the entry), skips `vendor/` and the folders frameworks write to (`var/`, `storage/`,
 `cache/`...), and does not work with `-mode prefork`. The log names the files that changed, then
 says `reloaded: every worker runs the new code` once the new code is up. Details:
-[Development: `-watch`](../README.md#development--watch).
+[Development: `-watch`](https://github.com/byjg/warmphp#development--watch).
 
 ## 4. The one change in your code
 
@@ -227,7 +232,7 @@ Turn OPcache on for the CLI (`opcache.enable_cli=1`, in `php.ini` or with `-php 
 
 The gateway logs JSON on stderr: a record per request with its time, CPU and memory in PHP, and PHP's
 errors, warnings and `error_log()`. An OpenTelemetry Collector can read them; see
-[Logs](../README.md#logs).
+[Logs](https://github.com/byjg/warmphp#logs).
 
 ## 7. PHP in Docker
 
@@ -265,7 +270,7 @@ The application stays in memory between requests, so:
 
 ## Next
 
-- [README](../README.md): every flag, the protocol, how the web functions are redefined
+- [README](https://github.com/byjg/warmphp): every flag, the protocol, how the web functions are redefined
 - [compatibility.md](compatibility.md): how each framework runs, and what was found
 - [benchmark.md](benchmark.md): FPM, the gateway and FrankenPHP compared on a real journey
 - [analysis.md](analysis.md): what those numbers mean, and which server to choose
