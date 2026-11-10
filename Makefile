@@ -1,6 +1,7 @@
 # warmphp
 #
 #   make build       the gateway binary, ./warmphp
+#   make lint        go vet
 #   make test        the gateway's tests, with real PHP workers
 #   make benchmark   the crud benchmark on gluo-framework-comparison (long: see docs/benchmark.md)
 #
@@ -10,15 +11,19 @@
 # docs/benchmark.md, e.g. make benchmark BENCH_ONLY=gluo BENCH_JOURNEYS=10
 
 BINARY := warmphp
+VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 WARMPHP_PHP ?= docker run --rm -i --init -v $(CURDIR):$(CURDIR) -v /tmp:/tmp -u $(shell id -u):$(shell id -g) byjg/php:8.5-fpm-nginx php -d xdebug.mode=off
 WARMPHP_COMPOSER ?= docker run --rm -v $(CURDIR):$(CURDIR) -w $(CURDIR)/examples/restserver -u $(shell id -u):$(shell id -g) -e COMPOSER_HOME=/tmp/composer byjg/php:8.5-fpm-nginx composer
 
-.PHONY: build test benchmark
+.PHONY: build lint test benchmark
 
 # Static (no cgo): one binary for any Linux, Alpine images included. GOOS and GOARCH pick another
 # platform: make build GOOS=darwin GOARCH=arm64
 build:
-	CGO_ENABLED=0 go build -o $(BINARY) .
+	CGO_ENABLED=0 go build -ldflags "-s -w -X main.buildVersion=$(VERSION)" -o $(BINARY) .
+
+lint:
+	go vet ./...
 
 test: examples/restserver/vendor
 	WARMPHP_PHP="$(WARMPHP_PHP)" go test -race ./...

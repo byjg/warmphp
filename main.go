@@ -46,6 +46,9 @@ type config struct {
 	embeddedDir string
 }
 
+// buildVersion is set at build time (make build, the release); a plain go build says dev
+var buildVersion = "dev"
+
 func main() {
 	// A log destination that exits must not stop the gateway: Go ends a program on a broken stderr
 	signal.Ignore(syscall.SIGPIPE)
@@ -54,6 +57,8 @@ func main() {
 
 	var cfg config
 	var php, extractDir, mode string
+	var showVersion bool
+	flag.BoolVar(&showVersion, "version", false, "print the version and exit")
 	flag.StringVar(&cfg.listen, "listen", ":8080", "address to listen on")
 	flag.StringVar(&php, "php", "php", "command that runs the PHP CLI; may include arguments, e.g. \"docker run --rm -i --init ... php\"")
 	flag.StringVar(&cfg.workerScript, "worker", "", "path to a worker.php to use instead of the embedded one")
@@ -76,6 +81,11 @@ func main() {
 		flag.PrintDefaults()
 	}
 	flag.Parse()
+
+	if showVersion {
+		fmt.Println("warmphp", buildVersion)
+		return
+	}
 
 	if extractDir != "" {
 		if err := extractTo(extractDir); err != nil {
