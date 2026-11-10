@@ -3,7 +3,9 @@
 // Boot: runs once per worker process (with -mode prefork, once in the master)
 echo "boot output must go to stderr, not to the protocol stream\n";
 require __DIR__ . '/Namespaced.php';
-session_save_path(sys_get_temp_dir());
+if (extension_loaded('session')) {   // TestWorksWithoutTheSessionExtension runs it without
+    session_save_path(sys_get_temp_dir());
+}
 $boot = bin2hex(random_bytes(4));
 mt_rand(); // seeds mt_rand() at boot: with -mode prefork, every child must still get its own sequence
 $count = 0;
@@ -124,6 +126,10 @@ return static function () use ($boot, &$count): void {
                 setcookie(session_name(), session_id(), ['path' => '/', 'samesite' => 'lax']);
             }
             echo json_encode(['visits' => $_SESSION['visits'], 'id' => session_id()]);
+            break;
+
+        case '/extensions':
+            echo json_encode(['session' => extension_loaded('session')]);
             break;
 
         case '/no-session':

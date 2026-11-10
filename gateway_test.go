@@ -436,6 +436,24 @@ func TestSessions(t *testing.T) {
 	}
 }
 
+// A PHP without the session extension (Alpine's php84 without php84-session; here php -n, which
+// leaves out the extensions php.ini loads) answers as any other: the worker uses the session
+// functions only when they exist
+func TestWorksWithoutTheSessionExtension(t *testing.T) {
+	srv := startGateway(t, "callable", "testdata/app.php", func(cfg *config) {
+		cfg.php = append(cfg.php, "-n")
+	})
+
+	_, body := get(t, srv.URL+"/extensions")
+	assertEqual(t, "session extension", decode(t, body), map[string]any{"session": false})
+
+	first, second := getCount(t, srv), getCount(t, srv)
+	assertEqual(t, "the worker keeps its state", [2]any{second.Boot, second.Count}, [2]any{first.Boot, first.Count + 1})
+
+	resp, _ := get(t, srv.URL+"/cookies")
+	assertEqual(t, "cookies, sent through the session cookie check", len(resp.Header.Values("Set-Cookie")), 5)
+}
+
 func TestOutputOutsideTheBuffersIsTheBody(t *testing.T) {
 	srv := startGateway(t, "callable", "testdata/app.php", nil)
 

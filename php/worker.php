@@ -491,13 +491,22 @@ final class PhpWorker
     }
 
     /**
+     * Sessions work in this PHP: the session extension may be missing (Alpine's php84 without
+     * php84-session), and then its functions do not exist at all
+     */
+    private static function sessionsEnabled(): bool
+    {
+        return function_exists('session_status') && session_status() !== PHP_SESSION_DISABLED;
+    }
+
+    /**
      * session_start() reads the id from the cookies PHP parsed at startup, never from the
      * $_COOKIE set here, so the id of this request's cookie is set before the application starts.
      */
     private static function beginSession(): void
     {
         unset($_SESSION);
-        if (session_status() === PHP_SESSION_DISABLED) {
+        if (!self::sessionsEnabled()) {
             return;
         }
         $id = $_COOKIE[session_name()] ?? '';
@@ -513,7 +522,7 @@ final class PhpWorker
      */
     private static function sendSessionCookie(): void
     {
-        if (session_status() === PHP_SESSION_DISABLED || !ini_get('session.use_cookies')) {
+        if (!self::sessionsEnabled() || !ini_get('session.use_cookies')) {
             return;
         }
         $id = session_id();
@@ -540,7 +549,7 @@ final class PhpWorker
      */
     private static function finishSession(): void
     {
-        if (session_status() === PHP_SESSION_DISABLED) {
+        if (!self::sessionsEnabled()) {
             return;
         }
         $started = isset($_SESSION);
