@@ -72,17 +72,14 @@ sudo dnf install warmphp
 
 ### Alpine
 
-Each release has an `.apk` for amd64 and arm64. Download the latest one for this machine and install it:
+Add the [ByJG package repository](https://opensource.byjg.com/docs/packages) (Alpine tab), then:
 
 ```bash
-VERSION=$(wget -qO- https://api.github.com/repos/byjg/warmphp/releases/latest | sed -n 's/.*"tag_name": *"v\([^"]*\)".*/\1/p')
-ARCH=$(uname -m | sed 's/x86_64/amd64/; s/aarch64/arm64/')
-wget "https://github.com/byjg/warmphp/releases/download/v${VERSION}/warmphp_${VERSION}_linux_${ARCH}.apk"
-apk add --allow-untrusted "warmphp_${VERSION}_linux_${ARCH}.apk"
+apk add warmphp
 ```
 
-The package is not signed, hence `--allow-untrusted`, and is not in a repository: run the same command again for a new version ([Package Repository](https://opensource.byjg.com/docs/packages#install-a-package), Alpine tab). Alpine splits PHP into small packages: install
-`php84-session` (and the extensions your application needs) beside `php84`.
+Alpine splits PHP into small packages: `php84` alone runs WarmPHP; add the extensions your application
+needs beside it (`php84-session` for sessions, `php84-pdo_mysql`...).
 
 ### Homebrew
 
