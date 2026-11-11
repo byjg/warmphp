@@ -2,6 +2,14 @@
   <title id="title">WarmPHP</title>
   <desc id="desc">A dark red flame with a blue core rises from a blue oval, beside the WarmPHP wordmark.</desc>
 
+  <!-- On a dark page the dark red is hard to read: the flame, "Warm" and its underline get lighter -->
+  <style>
+    @media (prefers-color-scheme: dark) {
+      .warm { fill: #E0524D; }
+      .warm-line { stroke: #E0524D; }
+    }
+  </style>
+
   <!-- The oval nods to PHP; the flame represents workers that stay warm. -->
   <g transform="translate(24 12)">
     <path d="M38 147 C12 155 12 176 43 188 C79 202 139 202 175 188 C206 176 206 155 180 147"
@@ -15,7 +23,7 @@
              C40 102 56 80 78 62
              C73 85 79 96 89 101
              C84 68 109 47 108 14 Z"
-          fill="#990000"/>
+          class="warm" fill="#990000"/>
     <path d="M115 101
              C117 119 141 131 141 150
              C141 167 128 179 112 179
@@ -26,8 +34,8 @@
 
   <text x="257" y="147"
         font-family="DejaVu Sans, Arial, Helvetica, sans-serif"
-        font-size="83" font-weight="800" letter-spacing="-4"><tspan fill="#990000">Warm</tspan><tspan fill="#2457D6">PHP</tspan></text>
-  <path d="M263 174 H348" fill="none" stroke="#990000" stroke-width="6" stroke-linecap="round"/>
+        font-size="83" font-weight="800" letter-spacing="-4"><tspan class="warm" fill="#990000">Warm</tspan><tspan fill="#2457D6">PHP</tspan></text>
+  <path class="warm-line" d="M263 174 H348" fill="none" stroke="#990000" stroke-width="6" stroke-linecap="round"/>
   <text x="365" y="181"
         font-family="DejaVu Sans, Arial, Helvetica, sans-serif"
         font-size="18" font-weight="600" letter-spacing="3" fill="#2457D6">BOOT ONCE. STAY WARM.</text>
