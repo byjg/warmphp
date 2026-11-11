@@ -57,25 +57,14 @@ How to install each one: [Install PHP](docs/getting-started.md#install-php).
 One static binary, for Linux and macOS, on amd64 and arm64. It needs no PHP to install: it runs the
 PHP CLI you point it to.
 
-### deb/rpm
+### Linux Packages (Debian/Fedora/Alpine)
 
-WarmPHP deb/rpm packages are provided by the **ByJG package repository**. First follow the
-[repository setup instructions](https://opensource.byjg.com/docs/packages#setup) for your distribution, then:
-
-```bash
-# Debian/Ubuntu
-sudo apt install warmphp
-
-# Fedora/RHEL
-sudo dnf install warmphp
-```
-
-### Alpine
-
-Add the [ByJG package repository](https://opensource.byjg.com/docs/packages) (Alpine tab), then:
+Add the [ByJG package repository](https://opensource.byjg.com/docs/packages#setup) for your distribution, then:
 
 ```bash
-apk add warmphp
+sudo apt install warmphp   # Debian/Ubuntu
+sudo dnf install warmphp   # Fedora/RHEL
+sudo apk add warmphp       # Alpine
 ```
 
 Alpine splits PHP into small packages: `php84` alone runs WarmPHP; add the extensions your application

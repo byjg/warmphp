@@ -71,17 +71,18 @@ Then run PHP through it, as in [PHP in Docker](#7-php-in-docker). Tested with PH
 
 ### Install from ByJG packages
 
-For Debian/Ubuntu or Fedora/RHEL, first follow the
+For Debian/Ubuntu, Fedora/RHEL or Alpine, first follow the
 [ByJG repository setup instructions](https://opensource.byjg.com/docs/packages#setup)
 for your distribution. Then install WarmPHP:
 
 ```bash
-# Debian/Ubuntu, after adding the ByJG APT repository
-sudo apt install warmphp
-
-# Fedora/RHEL, after adding the ByJG RPM repository
-sudo dnf install warmphp
+sudo apt install warmphp   # Debian/Ubuntu
+sudo dnf install warmphp   # Fedora/RHEL
+sudo apk add warmphp       # Alpine
 ```
+
+On Alpine, `php84` alone runs WarmPHP; add the extensions your application needs beside it
+(`php84-session` for sessions, `php84-pdo_mysql`...).
 
 For macOS or Linux with Homebrew:
 
@@ -89,8 +90,7 @@ For macOS or Linux with Homebrew:
 brew install byjg/tap/warmphp
 ```
 
-Homebrew installs Go as a build dependency automatically. For Alpine packages, see
-[the README's Alpine instructions](https://github.com/byjg/warmphp#alpine).
+Homebrew installs Go as a build dependency automatically.
 
 After package or Homebrew installation, run `warmphp` from your PATH instead of `./warmphp`.
 You can run your own application directly; the example below uses files from a source checkout.
