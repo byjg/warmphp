@@ -1,5 +1,7 @@
 # WarmPHP
 
+![WarmPHP — Boot once. Stay warm.](docs/logo.svg)
+
 [![Build Status](https://github.com/byjg/warmphp/actions/workflows/build.yml/badge.svg?branch=master)](https://github.com/byjg/warmphp/actions/workflows/build.yml)
 [![Opensource ByJG](https://img.shields.io/badge/opensource-byjg-success.svg)](http://opensource.byjg.com)
 [![Install MCP Server](https://img.shields.io/badge/Install-MCP_Server-8A2BE2?logo=modelcontextprotocol&logoColor=white)](https://opensource.byjg.com/docs/ai/mcpserver-byjg-docs/)
@@ -14,17 +16,26 @@ existing PHP binary.
 
 No FPM, no custom SAPI, no custom extension. Your application boots once and stays warm.
 
-```text
-Caddy / HAProxy / nginx / static-httpserver
-              │  plain HTTP (reverse proxy)
-              ▼
-      WarmPHP (Go)
-        - parses HTTP, builds $_SERVER (CGI/1.1 variables)
-        - keeps N workers alive, one request per worker at a time
-        - restarts crashed workers, kills slow ones, recycles after max-requests
-              │  stdin/stdout: length-prefixed JSON frames, bodies as raw bytes
-   ┌──────────┼──────────┐
- php worker.php   php worker.php   php worker.php   ← boot once, stay in memory
+```mermaid
+%%{init: {"flowchart": {"wrappingWidth": 400}}}%%
+flowchart TD
+    proxy["Caddy / HAProxy / nginx / static-httpserver"]
+    warmphp["<b>WarmPHP (Go)</b><br/><span style='display:block;font-size:14px;line-height:1.2;color:#ffffff'>Parses HTTP, builds $_SERVER,<br/>keeps N workers alive and healthy</span>"]
+    pool@{ shape: f-circ }
+    worker1["php worker.php"]
+    worker2["php worker.php"]
+    worker3["php worker.php"]
+    boot["Boot once, stay in memory"]
+
+    proxy -->|"plain HTTP (reverse proxy)"| warmphp
+    warmphp ---|"stdin/stdout: parsed request"| pool
+    pool --> worker1
+    pool --> worker2
+    pool --> worker3
+    worker2 ~~~ boot
+
+    style warmphp fill:#990000,color:#ffffff,stroke:#660000,stroke-width:2px,font-size:28px
+    style boot fill:transparent,stroke:transparent
 ```
 
 ## Documentation
@@ -57,25 +68,14 @@ How to install each one: [Install PHP](docs/getting-started.md#install-php).
 One static binary, for Linux and macOS, on amd64 and arm64. It needs no PHP to install: it runs the
 PHP CLI you point it to.
 
-### deb/rpm
+### Linux Packages (Debian/Fedora/Alpine)
 
-WarmPHP deb/rpm packages are provided by the **ByJG package repository**. First follow the
-[repository setup instructions](https://opensource.byjg.com/docs/packages#setup) for your distribution, then:
-
-```bash
-# Debian/Ubuntu
-sudo apt install warmphp
-
-# Fedora/RHEL
-sudo dnf install warmphp
-```
-
-### Alpine
-
-Add the [ByJG package repository](https://opensource.byjg.com/docs/packages) (Alpine tab), then:
+Add the [ByJG package repository](https://opensource.byjg.com/docs/packages#setup) for your distribution, then:
 
 ```bash
-apk add warmphp
+sudo apt install warmphp   # Debian/Ubuntu
+sudo dnf install warmphp   # Fedora/RHEL
+sudo apk add warmphp       # Alpine
 ```
 
 Alpine splits PHP into small packages: `php84` alone runs WarmPHP; add the extensions your application
