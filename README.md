@@ -14,17 +14,26 @@ existing PHP binary.
 
 No FPM, no custom SAPI, no custom extension. Your application boots once and stays warm.
 
-```text
-Caddy / HAProxy / nginx / static-httpserver
-              │  plain HTTP (reverse proxy)
-              ▼
-      WarmPHP (Go)
-        - parses HTTP, builds $_SERVER (CGI/1.1 variables)
-        - keeps N workers alive, one request per worker at a time
-        - restarts crashed workers, kills slow ones, recycles after max-requests
-              │  stdin/stdout: length-prefixed JSON frames, bodies as raw bytes
-   ┌──────────┼──────────┐
- php worker.php   php worker.php   php worker.php   ← boot once, stay in memory
+```mermaid
+%%{init: {"flowchart": {"wrappingWidth": 400}}}%%
+flowchart TD
+    proxy["Caddy / HAProxy / nginx / static-httpserver"]
+    warmphp["<b>WarmPHP (Go)</b><br/><span style='display:block;font-size:14px;line-height:1.2;color:#ffffff'>Parses HTTP, builds $_SERVER,<br/>keeps N workers alive and healthy</span>"]
+    pool@{ shape: f-circ }
+    worker1["php worker.php"]
+    worker2["php worker.php"]
+    worker3["php worker.php"]
+    boot["Boot once, stay in memory"]
+
+    proxy -->|"plain HTTP (reverse proxy)"| warmphp
+    warmphp ---|"stdin/stdout:<br/>length-prefixed JSON<br/>frames, bodies as raw bytes"| pool
+    pool --> worker1
+    pool --> worker2
+    pool --> worker3
+    worker2 ~~~ boot
+
+    style warmphp fill:#990000,color:#ffffff,stroke:#660000,stroke-width:2px,font-size:28px
+    style boot fill:transparent,stroke:transparent
 ```
 
 ## Documentation
