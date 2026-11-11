@@ -26,7 +26,7 @@ flowchart TD
     boot["Boot once, stay in memory"]
 
     proxy -->|"plain HTTP (reverse proxy)"| warmphp
-    warmphp ---|"stdin/stdout:<br/>length-prefixed JSON frames<br/>and raw bodies"| pool
+    warmphp ---|"stdin/stdout: parsed request"| pool
     pool --> worker1
     pool --> worker2
     pool --> worker3
